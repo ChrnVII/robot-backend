@@ -1,0 +1,23 @@
+[Unit]
+Description=Inspection Robot Inference Worker（受控模型包 / 隔离推理）
+After=robot-core.service
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/opt/inspection-robot
+EnvironmentFile=-/etc/inspection-robot/robot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/inspection-robot
+# 推理进程按需安装可选依赖：uv sync --extra inference
+ExecStart=/opt/inspection-robot/.venv/bin/python -m app.robot_core.processes.inference_worker --config /opt/inspection-robot/configs/hardware.yaml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/inspection-robot/data /opt/inspection-robot/run
+
+[Install]
+WantedBy=multi-user.target

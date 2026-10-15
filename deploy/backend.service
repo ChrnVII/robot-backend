@@ -1,0 +1,28 @@
+[Unit]
+Description=Inspection Robot Backend（FastAPI：REST / WebSocket / 鉴权 / 编排）
+After=network-online.target robot-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/opt/inspection-robot
+EnvironmentFile=-/etc/inspection-robot/robot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ROBOT_ROBOT_CORE_TRANSPORT=unix
+Environment=ROBOT_ROBOT_CORE_SOCKET=/opt/inspection-robot/run/robot-core.sock
+Environment=ROBOT_SENSOR_WORKER_TRANSPORT=unix
+Environment=ROBOT_SENSOR_WORKER_SOCKET=/opt/inspection-robot/run/sensor-worker.sock
+Environment=ROBOT_INSPECTION_WORKER_TRANSPORT=unix
+Environment=ROBOT_INSPECTION_WORKER_SOCKET=/opt/inspection-robot/run/inspection-worker.sock
+ExecStart=/opt/inspection-robot/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8100
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/inspection-robot/data /opt/inspection-robot/run
+
+[Install]
+WantedBy=multi-user.target

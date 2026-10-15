@@ -1,7 +1,33 @@
 [project]
 name = "backend"
-version = "0.1.0"
+version = "0.2.0"
+description = "巡检机器人业务后端（FastAPI）+ 机器人运行时（robot_core 五进程）"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "sqlalchemy>=2.0,<3",
+    "pyjwt>=2.8,<3",
+    "pyyaml>=6,<7",
+    "networkx>=3.2,<4",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
 ]
+
+[project.optional-dependencies]
+# 硬件设备能力（串口等），仅工控机安装
+hardware = ["pyserial>=3.5,<4", "pyserial-asyncio>=0.6,<1"]
+# 媒体采集能力（相机 / 音频），仅采集相关进程安装
+media = ["opencv-python-headless>=4.9,<5", "sounddevice>=0.4,<1"]
+# 模型推理能力（受控模型包），仅 inference-worker 安装
+inference = ["torch>=2.2,<3", "ultralytics>=8.3,<9"]
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.fastapi]
+entrypoint = "app.main:app"

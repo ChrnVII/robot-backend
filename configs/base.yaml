@@ -1,0 +1,97 @@
+schema_version: 1
+robot:
+  robot_id: robot-dev-001
+  timezone: Asia/Shanghai
+runtime:
+  mode: simulated
+  log_level: INFO
+  queue_size: 128
+devices:
+  camera:
+    transport: v4l2
+    device: "0"
+    width: 1280
+    height: 720
+    warmup_frames: 3
+    jpeg_quality: 90
+    control:
+      # Set these paths to the actual vendor API before hardware deployment.
+      base_url: http://127.0.0.1:8080
+      snapshot_path: /API/picture
+      ptz_path: null
+      preset_path: null
+      goto_preset_path: null
+      reboot_path: null
+      stop_path: null
+      state_path: null
+      method: POST
+      request_format: json
+      timeout_seconds: 5
+  audio:
+    device: null
+    sample_rate: 16000
+    channels: 1
+    duration_seconds: 3.0
+  environment:
+    base_url: http://127.0.0.1:9010
+    port_name: /dev/ttyS0
+    poll_interval_seconds: 5
+    timeout_seconds: 2
+inspection:
+  mode: single
+  queue_size: 2
+  batch_size: 1
+  capture_fps: 3
+  output_root: ../data/inspection
+storage:
+  backend: postgresql
+  # Simulated development keeps a local fallback; hardware deployments must
+  # provide ROBOT_DB_PASSWORD through the environment or systemd credentials.
+  database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
+  database: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
+  pool:
+    min_size: 1
+    max_size: 8
+    timeout_seconds: 10
+  media_root: ../data/media
+  telemetry_root: ../data/telemetry
+ipc:
+  robot_core: ../run/robot-core.sock
+  sensor_worker: ../run/sensor-worker.sock
+  inference_worker: ../run/inference-worker.sock
+  inspection_worker: ../run/inspection-worker.sock
+  sync_agent: ../run/sync-agent.sock
+api:
+  host: 127.0.0.1
+  port: 8100
+safety:
+  default_command_ttl_ms: 1000
+  lease_ttl_ms: 3000
+  max_motion_distance_m: 2.0
+  minimum_battery_percent: 15.0
+sync:
+  enabled: false
+  transport: https
+  endpoint: https://cloud.example.invalid/api/v1/robots/events
+  connect_timeout_seconds: 10
+  certificate_file: null
+  private_key_file: null
+  ca_file: null
+  batch_size: 50
+  retry_base_seconds: 2.0
+  max_attempts: 10
+  poll_interval_seconds: 2.0
+models:
+  package_root: ../model_library/packages
+  allow_test_adapter: true
+  heat_stress:
+    enabled: false
+    path: ../models/hs_detect/weights/best.pt
+    device: cpu
+    imgsz: 640
+    conf: 0.25
+    iou: 0.7
+legacy_compat:
+  enabled: true
+  config: ../config.json
+

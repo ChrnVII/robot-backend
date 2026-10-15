@@ -1,0 +1,19 @@
+# 运行缓存与测试产物
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地环境、运行数据与凭据
+.venv/
+.env
+data/
+run/
+
+# 数据库文件
+*.db
+
+# 参考材料与模型权重（不进 git，部署时单独同步）
+old_project/
+*.pt

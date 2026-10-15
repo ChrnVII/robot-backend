@@ -1,0 +1,22 @@
+[Unit]
+Description=Inspection Robot Core（设备唯一写入者 / 租约 / 安全 / 状态）
+After=local-fs.target systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+WorkingDirectory=/opt/inspection-robot
+EnvironmentFile=-/etc/inspection-robot/robot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/inspection-robot
+ExecStart=/opt/inspection-robot/.venv/bin/python -m app.robot_core.processes.robot_core --config /opt/inspection-robot/configs/hardware.yaml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/inspection-robot/data /opt/inspection-robot/run
+
+[Install]
+WantedBy=multi-user.target

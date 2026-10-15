@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Inspection Robot Platform Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "robot", "runtime", "storage", "ipc", "api", "safety", "sync", "models", "legacy_compat"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "robot": {"type": "object", "additionalProperties": false, "required": ["robot_id", "timezone"], "properties": {"robot_id": {"type": "string", "minLength": 1}, "timezone": {"type": "string", "minLength": 1}}},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["mode", "log_level", "queue_size"], "properties": {"mode": {"enum": ["simulated", "hardware"]}, "log_level": {"type": "string"}, "queue_size": {"type": "integer", "minimum": 1}}},
+    "storage": {"type": "object", "additionalProperties": false, "required": ["database", "media_root", "telemetry_root"], "properties": {"backend": {"enum": ["postgresql", "sqlite"]}, "database": {"type": "string"}, "database_url": {"type": "string"}, "media_root": {"type": "string"}, "telemetry_root": {"type": "string"}, "pool": {"type": "object", "additionalProperties": false, "properties": {"min_size": {"type": "integer", "minimum": 1}, "max_size": {"type": "integer", "minimum": 1}, "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}}}}},
+    "devices": {"type": "object", "additionalProperties": false, "properties": {"camera": {"$ref": "#/$defs/camera"}, "cameras": {"type": "object", "additionalProperties": false, "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/camera"}}}}, "audio": {"type": "object"}, "environment": {"type": "object"}}},
+    "ipc": {"type": "object"},
+    "api": {"type": "object"},
+    "safety": {"type": "object"},
+    "sync": {"type": "object"},
+    "inspection": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["single", "four", "eight"]}, "queue_size": {"type": "integer", "minimum": 1}, "batch_size": {"type": "integer", "minimum": 1}, "capture_fps": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}, "output_root": {"type": "string"}}},
+    "models": {"type": "object"},
+    "legacy_compat": {"type": "object"}
+  },
+  "$defs": {
+    "camera": {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string", "minLength": 1}, "camera_id": {"type": "string", "minLength": 1}, "enabled": {"type": "boolean"}, "transport": {"enum": ["v4l2", "http", "rtsp"]}, "device": {"type": ["string", "integer"]}, "host": {"type": "string", "minLength": 1}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "path": {"type": "string", "minLength": 1}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "warmup_frames": {"type": "integer", "minimum": 0, "maximum": 30}, "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}, "username": {}, "password": {}, "auth_scheme": {"enum": ["basic", "digest", "none"]}, "stream": {"type": "integer", "minimum": 0}, "jpeg_quality": {"type": "integer", "minimum": 1, "maximum": 100}}}
+  }
+}

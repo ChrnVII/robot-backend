@@ -1,0 +1,160 @@
+schema_version: 1
+robot:
+  robot_id: robot-production-001
+  timezone: Asia/Shanghai
+runtime:
+  mode: hardware
+  log_level: INFO
+  queue_size: 128
+devices:
+  camera:
+    transport: rtsp
+    camera_id: VAR-1
+    host: 192.168.137.64
+    port: 554
+    path: /Streaming/Channels/101
+    width: 1280
+    height: 720
+    timeout_seconds: 5
+    username: ${CAMERA_USERNAME:-admin}
+    password: ${CAMERA_PASSWORD}
+    auth_scheme: digest
+    stream: 101
+    jpeg_quality: 90
+    control:
+      protocol: hikvision_isapi
+      auth_scheme: digest
+      base_url: http://192.168.137.64
+      channel: 1
+      snapshot_path: /ISAPI/Streaming/channels/101/picture
+      ptz_path: /ISAPI/PTZCtrl/channels/1/continuous
+      preset_path: /ISAPI/PTZCtrl/channels/1/presets/{preset}
+      goto_preset_path: /ISAPI/PTZCtrl/channels/1/presets/{preset}/goto
+      reboot_path: /ISAPI/System/reboot
+      stop_path: /ISAPI/PTZCtrl/channels/1/continuous
+      state_path: /ISAPI/System/deviceInfo
+      method: PUT
+      request_format: xml
+      timeout_seconds: 5
+  cameras:
+    items:
+      - id: cam01
+        enabled: true
+        transport: http
+        host: 192.168.136.11
+        port: 8080
+        path: /API/picture
+        width: 1280
+        height: 720
+        timeout_seconds: 5
+      - id: cam02
+        enabled: true
+        transport: http
+        host: 192.168.136.12
+        port: 8080
+        path: /API/picture
+      - id: cam03
+        enabled: true
+        transport: http
+        host: 192.168.136.13
+        port: 8080
+        path: /API/picture
+      - id: cam04
+        enabled: true
+        transport: http
+        host: 192.168.136.14
+        port: 8080
+        path: /API/picture
+      - id: cam05
+        enabled: true
+        transport: http
+        host: 192.168.136.21
+        port: 8080
+        path: /API/picture
+      - id: cam06
+        enabled: true
+        transport: http
+        host: 192.168.136.22
+        port: 8080
+        path: /API/picture
+      - id: cam07
+        enabled: true
+        transport: http
+        host: 192.168.136.23
+        port: 8080
+        path: /API/picture
+      - id: cam08
+        enabled: true
+        transport: http
+        host: 192.168.136.24
+        port: 8080
+        path: /API/picture
+  audio:
+    device: null
+    sample_rate: 16000
+    channels: 1
+    duration_seconds: 3.0
+  environment:
+    base_url: http://127.0.0.1:9010
+    port_name: /dev/ttyS0
+    poll_interval_seconds: 5
+    timeout_seconds: 2
+inspection:
+  mode: single
+  queue_size: 2
+  batch_size: 8
+  capture_fps: 2
+  camera_startup_timeout_seconds: 30
+  output_root: ../data/inspection
+storage:
+  backend: postgresql
+  database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD}@127.0.0.1:5432/robot_platform
+  database: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD}@127.0.0.1:5432/robot_platform
+  pool:
+    min_size: 1
+    max_size: 8
+    timeout_seconds: 10
+  media_root: ../data/media
+  telemetry_root: ../data/telemetry
+ipc:
+  robot_core: ../run/robot-core.sock
+  sensor_worker: ../run/sensor-worker.sock
+  inference_worker: ../run/inference-worker.sock
+  inspection_worker: ../run/inspection-worker.sock
+  sync_agent: ../run/sync-agent.sock
+api:
+  host: 0.0.0.0
+  port: 8100
+safety:
+  default_command_ttl_ms: 1000
+  lease_ttl_ms: 3000
+  max_motion_distance_m: 2.0
+  minimum_battery_percent: 15.0
+sync:
+  enabled: false
+  transport: https
+  endpoint: https://cloud.example.invalid/api/v1/robots/events
+  connect_timeout_seconds: 10
+  certificate_file: null
+  private_key_file: null
+  ca_file: null
+  batch_size: 50
+  retry_base_seconds: 2.0
+  max_attempts: 10
+  poll_interval_seconds: 2.0
+models:
+  package_root: ../model_library/packages
+  allow_test_adapter: false
+  heat_stress:
+    enabled: true
+    path: ../models/hs_detect/weights/best.pt
+    sha256: DCA2001ACD89EDB5AA52AEF89D09DA83AD941CEEC79CEF7942FB999371120D49
+    # Defaults to CPU so the same config works on robots without NVIDIA runtime.
+    device: ${MODEL_DEVICE:-cpu}
+    imgsz: 640
+    conf: 0.25
+    iou: 0.7
+legacy_compat:
+  enabled: true
+  config: ../config.json
+
