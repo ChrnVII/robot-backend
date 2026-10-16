@@ -60,5 +60,5 @@ class MediaStore:
     def discard(self, asset: Dict[str, Any]) -> None:
         uri = str(asset["uri"])
         parsed = urlparse(uri)
-        path = Path(unquote(parsed.path.lstrip("/"))) if os.name == "nt" else Path(unquote(parsed.path))
+        path = Path(unquote(parsed.path))
         path.unlink(missing_ok=True)

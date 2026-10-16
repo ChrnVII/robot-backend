@@ -26,8 +26,8 @@ sudo -u postgres psql -c "CREATE DATABASE robot_platform OWNER robot;"
 # 4) 凭据：cd <项目> && cp robot.env.example robot.env，填写后 chmod 600 robot.env
 ```
 
-说明：开发机整体复制来的 `.venv/` 是 Windows 环境、机器人上不可用，`uv sync`
-会自动重建；若提示环境不兼容，先 `rm -rf .venv` 再同步。运行期不依赖 uv
+说明：拷入的 `.venv/` 若不是在本机 Linux 上创建（例如从其他平台复制），机器人上不可用，
+`uv sync` 会自动重建；若提示环境不兼容，先 `rm -rf .venv` 再同步。运行期不依赖 uv
 （systemd 直接调用 `.venv/bin/python`）。
 
 ## systemd（推荐，生产）
@@ -81,11 +81,11 @@ deploy/quick_start_up.sh stop      # 全部停止（与启动相反的顺序）
 sync-agent，最后 uvicorn 后端。手工单进程启动形如
 `nohup .venv/bin/python -m app.robot_core.processes.robot_core --config configs/hardware.yaml &`。
 
-## 联调与开发（Windows / 无硬件）
+## 联调与开发（无硬件）
 
 ```bash
 uv sync                       # 全量依赖（含 torch/opencv/串口；默认组已配置）
-uv run fastapi dev            # http://127.0.0.1:8000（默认 mock 网关，无需机器人进程）
+uv run fastapi dev            # http://127.0.0.1:8000（需先启动 robot_core 五进程）
 uv run pytest                 # 全量测试（robot_core + 后端；需要 PostgreSQL 测试库）
 ```
 
@@ -105,4 +105,4 @@ uv run pytest                 # 全量测试（robot_core + 后端；需要 Post
 ## 放行限制（沿用旧平台约定）
 
 以下条件未满足前禁止切换生产控制权：真实设备协议与 HIL 测试、受控模型包验收、
-生产凭据与网络分区、急停/失联停车验收。本仓库默认 `mock` / `simulated` 不驱动真实硬件。
+生产凭据与网络分区、急停/失联停车验收。本仓库默认 `simulated` 不驱动真实硬件。

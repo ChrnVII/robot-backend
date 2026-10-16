@@ -40,7 +40,7 @@ esac
 load_env() {
   if [ -f "$ENV_FILE" ]; then
     if grep -q $'\r' "$ENV_FILE" 2>/dev/null; then
-      warn "$ENV_FILE 含 Windows 换行（CRLF），自动转为 LF"
+      warn "$ENV_FILE 含 CRLF 换行，自动转为 LF"
       sed -i 's/\r$//' "$ENV_FILE"
     fi
     set -a; . "$ENV_FILE"; set +a
@@ -57,9 +57,9 @@ load_env() {
 }
 
 ensure_venv() {
-  # 复制来的 Windows venv 没有 bin/python，会被这里识别并重建
+  # 非本机 Linux 创建的 venv 没有 bin/python，会被这里识别并重建
   if [ ! -x .venv/bin/python ]; then
-    warn ".venv 不可用（缺失或来自 Windows 复制），执行 uv sync 重建…"
+    warn ".venv 不可用（缺失或平台不兼容），执行 uv sync 重建…"
     command -v uv >/dev/null 2>&1 || die "未找到 uv：请先安装（curl -LsSf https://astral.sh/uv/install.sh | sh）"
     uv sync --frozen
   fi

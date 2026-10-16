@@ -61,7 +61,6 @@ def test_results_reads_persisted_entries():
 
 def test_results_degrade_to_empty_page_without_database():
     # 本用例开始前测试库已重建为空 schema（无表结构）：按契约降级为空页
-    # （对齐「mock 检测列表为空」）
     service = InferenceQueryService(TEST_DSN)
     try:
         page = service.results("run-1", 0, 50)

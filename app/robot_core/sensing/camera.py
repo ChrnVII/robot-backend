@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -39,7 +38,7 @@ class CameraSettings:
 
 
 class OpenCVCameraProvider:
-    """Capture one JPEG frame from a V4L2/DirectShow-compatible camera."""
+    """Capture one JPEG frame from a V4L2 camera."""
 
     def __init__(self, settings: CameraSettings | None = None, *, cv2_module: Any = None):
         self.settings = settings or CameraSettings()
@@ -49,12 +48,9 @@ class OpenCVCameraProvider:
         cv2 = self._load_cv2()
         settings = self._settings_for(request)
         source = self._camera_source(settings.device)
-        # Prefer the native backend on each platform.  The fallback matters for
-        # lightweight test doubles (and OpenCV builds without DirectShow).
-        if os.name == "nt" and hasattr(cv2, "CAP_DSHOW"):
-            backend = cv2.CAP_DSHOW
-        else:
-            backend = getattr(cv2, "CAP_V4L2", 0)
+        # Linux 工控机统一使用 V4L2 采集后端；getattr 兜底以兼容精简的 OpenCV
+        # 构建与轻量测试替身。
+        backend = getattr(cv2, "CAP_V4L2", 0)
         camera = cv2.VideoCapture(source, backend)
         try:
             if not camera.isOpened():

@@ -28,8 +28,6 @@ class JsonSocketServer:
         self.server: Any = None
 
     async def start(self) -> None:
-        if os.name == "nt":
-            raise RuntimeError("Unix domain socket services require the target Linux IPC")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(self._handle, path=str(self.path))

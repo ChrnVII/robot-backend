@@ -39,7 +39,7 @@ def test_detections_empty_without_robot_database(client):
     assert alias["total"] == 0
 
 
-def test_evidence_image_not_found_in_mock(client):
+def test_evidence_image_not_found_without_evidence(client):
     response = client.get("/api/v1/inspections/insp-1/images/cam01:00000001_result.jpg")
     assert response.status_code == 404
     assert response.json()["code"] == "FILE_NOT_FOUND_ERROR"

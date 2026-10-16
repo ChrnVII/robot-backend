@@ -1,6 +1,6 @@
 """FastAPI 依赖注入：网关实例、业务服务与数据库会话。
 
-网关实例按 app.common.config 的 transport 配置选择 mock / unix（进程内单例）。
+网关实例通过 Linux 工控机 UDS 连接机器人进程（进程内单例）。
 测试可用 app.dependency_overrides 或 get_settings.cache_clear() 替换。
 """
 

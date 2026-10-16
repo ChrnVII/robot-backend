@@ -2,8 +2,7 @@
 
 迁移来源：InspectionApplicationService.java、InferenceQueryService.java。
 - InspectionService：经 inspection-worker 网关（IPC）；
-- InferenceQueryService：只读 robot_platform 库的推理记录（数据库不可用时返回空页，
-  与旧文档「mock 模式检测列表为空」一致）。
+- InferenceQueryService：只读 robot_platform 库的推理记录（数据库不可用时返回空页）。
 """
 
 from __future__ import annotations

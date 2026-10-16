@@ -22,14 +22,11 @@ class Settings(BaseSettings):
     robot_id: str = "robot-dev-001"
     mode: str = "simulated"  # simulated | hardware
 
-    # 机器人进程网关：transport = mock（Windows 开发 / 联调）| unix（Linux 工控机 UDS）
-    robot_core_transport: str = "mock"
+    # 机器人进程网关：通过 Linux 工控机 UDS（Unix domain socket）通信
     robot_core_socket: str = "run/robot-core.sock"
     robot_core_timeout: float = 5.0
-    sensor_worker_transport: str = "mock"
     sensor_worker_socket: str = "run/sensor-worker.sock"
     sensor_worker_timeout: float = 65.0
-    inspection_worker_transport: str = "mock"
     inspection_worker_socket: str = "run/inspection-worker.sock"
     inspection_worker_timeout: float = 10.0
 

@@ -20,7 +20,7 @@ Vue 工作台
   → PostgreSQL robot_platform + 本地媒体文件
 ```
 
-Windows 开发机没有 UDS：把网关 transport 设为 `mock`（默认值），无需启动机器人进程即可全量联调。
+机器人进程通过 Unix domain socket 通信（Linux 工控机）；联调需先启动 robot_core 五进程，见 [`deploy/README.md`](deploy/README.md)。
 
 ## 目录结构
 
@@ -35,7 +35,7 @@ app/
     ws/                   hub.py 推送骨架 + routes.py 四个实时通道（500ms）
   common/                 config / logging / exceptions（错误码表）/ responses（封套）/ middleware（X-Trace-Id）/ clock
   security/               JWT（登录/刷新/登出/me）与角色依赖（默认关闭）
-  gateways/               机器人进程网关：base（错误映射+camelize）/ mock / robot_core / sensor_worker / inspection_worker
+  gateways/               机器人进程网关：base（错误映射+camelize）/ robot_core / sensor_worker / inspection_worker
   ipc/                    UDS JSON Lines 协议（JsonSocketClient/Server，错误码透传）
   services/               robot / control / media / inspection（含检测分页）/ workbench（DB）
   schemas/                Pydantic 出入参（camelCase 线上契约）
@@ -57,7 +57,7 @@ deploy/                   systemd 单元模板 + target；启动脚本；robot.e
 
 ```bash
 uv sync                        # 全量依赖（一条命令装齐，含 torch / opencv / 串口）
-uv run fastapi dev             # 开发服务器 http://127.0.0.1:8000（默认 mock 网关）
+uv run fastapi dev             # 开发服务器 http://127.0.0.1:8000（需同日启动 robot_core 五进程）
 uv run pytest                  # 全量测试（118 项）
 
 # 生产形态（沿用旧端口 8100）
@@ -131,6 +131,6 @@ uv run pytest tests/backend -v   # 后端接口/契约/WS/鉴权
 uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检/同步）
 ```
 
-覆盖：封套与 TraceId、mock 网关全接口、命令幂等与急停副作用、检测分页（真实 PostgreSQL 联调）、
+覆盖：封套与 TraceId、网关全接口、命令幂等与急停副作用、检测分页（真实 PostgreSQL 联调）、
 工作台 CRUD 与版本冲突、鉴权全流程、WebSocket 四通道与非法 ID、UDS 协议（Linux）、
 租约冲突/命令过期/运动限制等内核契约。

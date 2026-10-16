@@ -1,4 +1,4 @@
-"""后端到机器人进程的网关（mock / unix 双实现按配置选择）。"""
+"""后端到机器人进程的网关（Linux 工控机 UDS 上的 JSON Lines 契约）。"""
 
 from app.gateways.base import (
     InspectionWorkerError,

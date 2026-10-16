@@ -38,10 +38,8 @@ async def lifespan(app: FastAPI):
     finally:
         session.close()
     logger.info(
-        "backend ready: robot=%s mode=%s transports(core=%s sensor=%s inspection=%s) auth=%s",
-        settings.robot_id, settings.mode,
-        settings.robot_core_transport, settings.sensor_worker_transport,
-        settings.inspection_worker_transport, settings.auth_enabled,
+        "backend ready: robot=%s mode=%s auth=%s",
+        settings.robot_id, settings.mode, settings.auth_enabled,
     )
     yield
     # 退出：释放数据库连接
