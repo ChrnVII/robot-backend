@@ -5,8 +5,7 @@
     rtsp://.../102  ──PyAV 低延迟 demux──┬─► Annex-B 透传 ──► WebSocket ──► 浏览器 WebCodecs
                                         └─► decode ──► 最新帧槽位 ──► 检测线程
 
-不落盘、不写库：实时预览每帧都落盘会在几小时内堆出成千上万个文件与数据行。
-需要留证时走既有的一次性抓图接口（/api/v1/media/captures）。
+录像按需将同一份原始码流转封装为 MKV，独立写盘队列不阻塞预览。
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from typing import Any
 
 from app.video.codec import (
     FLAG_KEY,
+    FLAG_RST,
     HEVC_CODEC_FALLBACK,
     HEVC_CRA,
     HEVC_IDR_N_LP,
@@ -85,6 +85,7 @@ class RtspStreamReader(threading.Thread):
         *,
         stop_event: threading.Event,
         slot: FrameSlot | None = None,
+        recorder=None,
         transport: str = "tcp",
         timeout_us: int = 5_000_000,
         reconnect_delay: float = 2.0,
@@ -93,8 +94,10 @@ class RtspStreamReader(threading.Thread):
         self.url = url
         self.broadcaster = broadcaster
         self.slot = slot
-        self._stop = stop_event
+        self.recorder = recorder
+        self._stop_event = stop_event
         self._options = open_options(transport=transport, timeout_us=timeout_us)
+        self._io_timeout = max(0.1, timeout_us / 1_000_000)
         self.reconnect_delay = max(0.2, float(reconnect_delay))
 
         self.timeline = Timeline()
@@ -183,20 +186,20 @@ class RtspStreamReader(threading.Thread):
         if av is None:
             return
         logger.info("摄像头预览拉流线程启动：%s", mask_credentials(self.url))
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 self._session(av)
             except self._error_cls as exc:  # noqa: PERF203 - 按类型分流日志级别
                 self.connected = False
-                if self._stop.is_set():
+                if self._stop_event.is_set():
                     break
                 # FFmpeg 的异常文本会带上完整 RTSP 地址，必须先擦掉口令再落地
                 self.last_error = redact_credentials(exc)
                 logger.warning("RTSP 断开（%s），%.1fs 后重连", self.last_error, self.reconnect_delay)
-                self._stop.wait(self.reconnect_delay)
+                self._stop_event.wait(self.reconnect_delay)
             except Exception as exc:  # noqa: BLE001 - 线程顶层必须兜住
                 self.connected = False
-                if self._stop.is_set():
+                if self._stop_event.is_set():
                     break
                 # 漏出去会让线程静默死掉，之后再也不重连
                 message = redact_credentials(exc)
@@ -206,12 +209,13 @@ class RtspStreamReader(threading.Thread):
                     logger.error("拉流线程异常（%s），%.1fs 后重连", message, self.reconnect_delay)
                 else:
                     logger.exception("拉流线程异常，%.1fs 后重连", self.reconnect_delay)
-                self._stop.wait(self.reconnect_delay)
+                self._stop_event.wait(self.reconnect_delay)
         logger.info("摄像头预览拉流线程退出")
 
     def _session(self, av: Any) -> None:
         # PyAV 的 options 值统一给字符串，避免不同版本对类型校验不一致
-        with av.open(self.url, options=self._options) as container:
+        self._sps = self._pps = self._vps = self._codec = None
+        with av.open(self.url, options=self._options, timeout=(self._io_timeout, self._io_timeout)) as container:
             if not container.streams.video:
                 raise RuntimeError("该 RTSP 地址里没有视频流")
             stream = container.streams.video[0]
@@ -259,62 +263,74 @@ class RtspStreamReader(threading.Thread):
                 codec_name, self._codec, width, height, in_tb,
             )
 
-            for packet in container.demux(stream):
-                if self._stop.is_set():
-                    break
-                # demux 末尾的 flushing 包没有载荷。不能只看 dts is None，
-                # 因为部分 RTSP 设备给的 dts 本来就是空的。
-                if not packet.size:
-                    continue
-                try:
-                    raw = bytes(packet)
-                except Exception:  # noqa: BLE001 - 个别损坏包会读取失败
-                    logger.debug("读取 packet 载荷失败，跳过该包", exc_info=True)
-                    continue
-                if not raw:
-                    continue
-
-                # 实时链路的 pts：这一帧的到达时刻（WebSocket 帧头与此同值）
-                pts_ms = self.timeline.now_ms()
-                self.packets_rx += 1
-
-                nals = split_annexb(raw)
-                self._absorb(nals)
-                is_key = bool(packet.is_keyframe) or any(self._is_key_nal(nal) for nal in nals)
-                if is_key:
-                    self.keyframes_rx += 1
-
-                # 关键帧重建成 VPS/SPS/PPS + IDR，保证浏览器任意时刻接入都能解码，
-                # 不必等设备重发参数集。
-                if is_key:
-                    body = annexb(*(nal for nal in nals if not self._is_param_nal(nal)))
-                    payload = self._params() + body if body else raw
-                else:
-                    payload = raw
-
-                self._seq = (self._seq + 1) & 0xFFFFFFFF
-                flags = FLAG_KEY if is_key else 0
-                self.broadcaster.broadcast(pack_frame(flags, pts_ms, self._seq) + payload)
-
-                # 解码交给检测线程用；子码流很便宜，放这里可以不额外占一条 RTSP 连接。
-                if self.slot is not None:
+            preview_ready = False
+            try:
+                for packet in container.demux(stream):
+                    if self._stop_event.is_set():
+                        break
+                    # demux 末尾的 flushing 包没有载荷。不能只看 dts is None，
+                    # 因为部分 RTSP 设备给的 dts 本来就是空的。
+                    if not packet.size:
+                        continue
                     try:
-                        frames = packet.decode()
-                    except self._error_cls:
-                        self.decode_errors += 1
-                        if self.decode_errors <= 3 or self.decode_errors % 500 == 0:
-                            logger.warning(
-                                "解码出错（累计 %d 次），等下一个关键帧恢复", self.decode_errors
+                        raw = bytes(packet)
+                    except Exception:  # noqa: BLE001 - 个别损坏包会读取失败
+                        logger.debug("读取 packet 载荷失败，跳过该包", exc_info=True)
+                        continue
+                    if not raw:
+                        continue
+
+                    if self.recorder is not None:
+                        self.recorder.submit(packet, stream)
+
+                    # 实时链路的 pts：这一帧的到达时刻（WebSocket 帧头与此同值）
+                    pts_ms = self.timeline.now_ms()
+                    self.packets_rx += 1
+
+                    nals = split_annexb(raw)
+                    self._absorb(nals)
+                    is_key = bool(packet.is_keyframe) or any(self._is_key_nal(nal) for nal in nals)
+                    if is_key:
+                        self.keyframes_rx += 1
+
+                    # 关键帧重建成 VPS/SPS/PPS + IDR，保证浏览器任意时刻接入都能解码，
+                    # 不必等设备重发参数集。
+                    if is_key:
+                        body = annexb(*(nal for nal in nals if not self._is_param_nal(nal)))
+                        payload = self._params() + body if body else raw
+                    else:
+                        payload = raw
+
+                    self._seq = (self._seq + 1) & 0xFFFFFFFF
+                    flags = FLAG_KEY if is_key else 0
+                    if is_key and not preview_ready:
+                        flags |= FLAG_RST
+                        preview_ready = True
+                    if preview_ready:
+                        self.broadcaster.broadcast(pack_frame(flags, pts_ms, self._seq) + payload)
+
+                    # 解码交给检测线程用；子码流很便宜，放这里可以不额外占一条 RTSP 连接。
+                    if self.slot is not None:
+                        try:
+                            frames = packet.decode()
+                        except self._error_cls:
+                            self.decode_errors += 1
+                            if self.decode_errors <= 3 or self.decode_errors % 500 == 0:
+                                logger.warning(
+                                    "解码出错（累计 %d 次），等下一个关键帧恢复", self.decode_errors
+                                )
+                            frames = []
+                        if frames:
+                            last = frames[-1]
+                            source_pts = last.pts if last.pts is not None else packet.pts
+                            self.slot.put(
+                                last,
+                                pts_ms,
+                                ticks_to_ms(source_pts, in_tb) if source_pts is not None else None,
                             )
-                        frames = []
-                    if frames:
-                        last = frames[-1]
-                        source_pts = last.pts if last.pts is not None else packet.pts
-                        self.slot.put(
-                            last,
-                            pts_ms,
-                            ticks_to_ms(source_pts, in_tb) if source_pts is not None else None,
-                        )
+            finally:
+                if self.recorder is not None:
+                    self.recorder.finish()
 
         self.connected = False
         logger.info(

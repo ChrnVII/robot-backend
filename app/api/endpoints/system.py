@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
+from pydantic import BaseModel
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -100,3 +102,40 @@ def _uri_to_path(uri: str) -> Path:
     if uri.startswith("file://"):
         return Path(url2pathname(urlparse(uri).path))
     return Path(uri)
+
+
+class RecordingControl(BaseModel):
+    action: Literal["start", "stop"]
+
+
+@router.get("/cam/recordings", tags=["system"])
+def camera_recordings(request: Request) -> dict:
+    return ok(get_camera_stream_service().recorder.files(), trace_of(request))
+
+
+@router.post("/cam/recordings", tags=["system"])
+def control_camera_recording(body: RecordingControl, request: Request) -> dict:
+    service = get_camera_stream_service()
+    if body.action == "start":
+        state = service.status()
+        if not service.started or not state.get("connected") or state.get("fatal"):
+            raise AppError("摄像头码流尚未连接，无法开始录像", code="STREAM_UNAVAILABLE", status_code=409)
+        try:
+            result = service.recorder.start()
+        except OSError as exc:
+            raise AppError("录像目录不可写", code="RECORDING_STORAGE_ERROR", status_code=503) from exc
+    else:
+        result = service.recorder.finish(stop=True)
+    return ok(result, trace_of(request))
+
+
+@router.get("/cam/recordings/{name}", tags=["system"])
+def download_camera_recording(name: str) -> FileResponse:
+    path = get_camera_stream_service().recorder.file(name)
+    return FileResponse(path, media_type="video/x-matroska", filename=path.name)
+
+
+@router.delete("/cam/recordings/{name}", tags=["system"])
+def delete_camera_recording(name: str, request: Request) -> dict:
+    get_camera_stream_service().recorder.file(name).unlink()
+    return ok({"deleted": name}, trace_of(request))

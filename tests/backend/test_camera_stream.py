@@ -271,6 +271,9 @@ class _FakeWebSocket:
     async def accept(self) -> None:
         self.accepted = True
 
+    async def receive(self):
+        await asyncio.Future()
+
     async def send_json(self, payload: object) -> None:
         self.sent.append(("json", payload))
 
@@ -371,3 +374,18 @@ def test_frame_slot_is_thread_safe_across_threads():
     assert received > 0
     # 槽位只保留最新一帧：产出与丢弃之和不应超过总产出
     assert received + slot.dropped <= 500
+
+
+def test_preview_disconnect_removes_idle_subscriber(monkeypatch):
+    broadcaster = CameraBroadcaster()
+    monkeypatch.setattr(ws_routes, "get_camera_stream_service", lambda: _StubService(broadcaster))
+
+    class DisconnectedSocket(_FakeWebSocket):
+        async def receive(self):
+            return {"type": "websocket.disconnect", "code": 1000}
+
+    async def scenario():
+        await asyncio.wait_for(ws_routes.camera_preview_socket(DisconnectedSocket(), accessToken=None), 1)
+        assert broadcaster.client_count == 0
+
+    asyncio.run(scenario())

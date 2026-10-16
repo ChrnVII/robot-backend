@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     camera_stream_timeout_us: int = 5_000_000  # RTSP 超时（微秒）
     camera_stream_client_queue: int = 8  # 每个浏览器订阅者的帧队列上限
     camera_stream_reconnect_delay: float = 2.0
+    camera_recordings_dir: str = "data/camera-recordings"
+    camera_recordings_queue: int = 600
 
     # 实时检测叠加（可选，只推给前端，不落库 —— 留档仍走 inference-worker）
     camera_stream_detect_enabled: bool = False

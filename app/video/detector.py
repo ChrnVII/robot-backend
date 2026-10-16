@@ -40,7 +40,7 @@ class DetectionThread(threading.Thread):
         super().__init__(name="camera-detector", daemon=True)
         self.slot = slot
         self.broadcaster = broadcaster
-        self._stop = stop_event
+        self._stop_event = stop_event
         self.model_path = model_path
         self.imgsz = max(64, int(imgsz))
         self.conf = float(conf)
@@ -81,7 +81,7 @@ class DetectionThread(threading.Thread):
     def run(self) -> None:
         if not self._load():
             return
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             item = self.slot.take(timeout=0.5)
             if item is None:
                 continue

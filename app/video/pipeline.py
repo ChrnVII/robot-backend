@@ -146,6 +146,7 @@ class CameraBroadcaster:
 
     def add_client(self) -> ViewerClient:
         client = ViewerClient(self.max_queue)
+        client.need_reset = True
         self._clients.add(client)
         return client
 

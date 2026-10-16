@@ -181,3 +181,22 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 工作台 CRUD 与版本冲突、鉴权全流程、WebSocket 四通道与非法 ID、UDS 协议（Linux）、
 租约冲突/命令过期/运动限制等内核契约；新增覆盖 IPC 连接复用与陈旧连接重试、
 契约核字段往返、WS 主题扇出/事件唤醒/防抖/失败容错。
+
+### 球形摄像头实时预览与录像
+
+后端 web 进程使用一路 RTSP，同时向浏览器推送 Annex-B 码流，并按需原样转封装为 MKV；不重编码。此次只实现预览与录像，既有实时检测配置默认关闭。原有云台、预置点和抓图接口继续独立工作。
+
+在 `robot.env` 配置 `ROBOT_CAMERA_STREAM_URL=rtsp://<user>:<encoded-password>@<host>:554/Streaming/Channels/102`，建议子码流使用 H.264。`uv sync` 默认包含 streaming 依赖组（PyAV）。浏览器低延迟预览需要 Chrome / Edge，并通过 HTTPS 或 localhost 访问；不具备解码条件时显示已鉴权的 JPEG 快照预览。
+
+录像在页面手动开始/停止，保存到 `ROBOT_CAMERA_RECORDINGS_DIR`（默认 `data/camera-recordings`，相对于后端工作目录）。起录等待关键帧，停止时排空队列并关闭容器；离开页面仍继续录制。RTSP 断线时结束当前文件，重连后从关键帧另开文件。写盘错误或队列积压时停止录像并报告错误，避免静默丢失参考帧。
+
+接口（沿用 `/api/v1` 统一鉴权）：
+- `GET /api/v1/cam/stream/status`：连接诊断及 `recording` 状态。
+- `GET /api/v1/cam/recordings`：文件列表，`active` 标识正在写入的文件。
+- `POST /api/v1/cam/recordings`：`{"action":"start"}` 或 `{"action":"stop"}`。
+- `GET /api/v1/cam/recordings/{name}`：下载已收尾的 MKV。
+- `DELETE /api/v1/cam/recordings/{name}`：删除已收尾的 MKV。
+
+正在写入的文件禁止下载和删除。文件持续录制到手动停止或连接中断，请按需维护录像目录的可用空间。
+
+无实机回归：`uv run pytest tests/backend/test_camera_stream.py tests/backend/test_camera_recording.py`。测试通过本地生成的 H.264 编码数据验证 MKV 落盘、解码回读和时间间隔，并覆盖启停、断线分段、写盘异常和文件接口；摄像头实机延迟与兼容性仍需现场验收。

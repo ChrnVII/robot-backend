@@ -25,6 +25,7 @@ from app.video.codec import Timeline, mask_credentials
 from app.video.detector import DetectionThread
 from app.video.pipeline import CameraBroadcaster, FrameSlot
 from app.video.reader import RtspStreamReader
+from app.video.recorder import CameraRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class CameraStreamService:
         self._settings = settings
         self._stop = threading.Event()
         self._broadcaster = CameraBroadcaster(max_queue=settings.camera_stream_client_queue)
+        self.recorder = CameraRecorder(settings.camera_recordings_dir, self._broadcaster.publish,
+                                       settings.camera_recordings_queue)
         self._slot: FrameSlot | None = None
         self._reader: RtspStreamReader | None = None
         self._detector: DetectionThread | None = None
@@ -95,7 +98,12 @@ class CameraStreamService:
                          mask_credentials(self.url))
             return False
 
+        import importlib.util
+        if importlib.util.find_spec("av") is None:
+            self._skip_reason = "pyav_missing"
+            return False
         self._stop.clear()
+        self.recorder.start_worker()
         self._broadcaster.attach_loop(loop)
 
         detect_enabled = bool(self._settings.camera_stream_detect_enabled)
@@ -106,6 +114,7 @@ class CameraStreamService:
             self._broadcaster,
             stop_event=self._stop,
             slot=self._slot,
+            recorder=self.recorder,
             transport=str(self._settings.camera_stream_transport),
             timeout_us=int(self._settings.camera_stream_timeout_us),
             reconnect_delay=float(self._settings.camera_stream_reconnect_delay),
@@ -145,7 +154,8 @@ class CameraStreamService:
         self._broadcaster.close_clients(SERVICE_RESTARTED)
         for thread in (self._detector, self._reader):
             if thread is not None and thread.is_alive():
-                thread.join(timeout=5.0)
+                thread.join(timeout=max(1.0, self._settings.camera_stream_timeout_us / 1_000_000) * 2 + 12)
+        self.recorder.finish(stop=True, shutdown=True)
         self._detector = None
         self._reader = None
         self._slot = None
@@ -165,6 +175,7 @@ class CameraStreamService:
             "codec": self._broadcaster.codec,
             "size": list(self._broadcaster.size),
             "clients": self._broadcaster.client_count,
+            "recording": self.recorder.status(),
             "detectEnabled": self._slot is not None,
         }
         if self._reader is not None:

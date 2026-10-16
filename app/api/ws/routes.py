@@ -18,6 +18,8 @@ v2 改造：
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 
@@ -175,14 +177,30 @@ async def camera_preview_socket(
         return
 
     client = broadcaster.add_client()
+
+    async def wait_for_disconnect() -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+
+    receiver = asyncio.create_task(wait_for_disconnect())
+    pending_frame = None
     try:
         config = broadcaster.config_message
         if config:
             await websocket.send_text(config)
         while True:
-            item = await client.queue.get()
+            pending_frame = asyncio.create_task(client.queue.get())
+            done, _ = await asyncio.wait((receiver, pending_frame), return_when=asyncio.FIRST_COMPLETED)
+            if receiver in done:
+                break
+            item = pending_frame.result()
             if isinstance(item, str):
                 await websocket.send_text(item)
+                if json.loads(item).get("t") == "stop":
+                    await close_quietly(websocket, _SERVICE_RESTARTED)
+                    break
             else:
                 await websocket.send_bytes(item)
     except WebSocketDisconnect:
@@ -191,3 +209,7 @@ async def camera_preview_socket(
         logger.debug("摄像头预览客户端异常断开", exc_info=True)
     finally:
         broadcaster.remove_client(client)
+        tasks = [task for task in (receiver, pending_frame) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
