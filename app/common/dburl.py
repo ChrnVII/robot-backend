@@ -9,6 +9,18 @@ def is_postgres_url(url: str | None) -> bool:
     return bool(url) and str(url).startswith(_POSTGRES_SCHEMES)
 
 
+def psycopg_dsn(url: str) -> str:
+    """SQLAlchemy DSN -> psycopg conninfo（psycopg 不识别 ``+psycopg`` 方言后缀）。
+
+    供 WS 事件监听（LISTEN）等直接使用 psycopg 的场景复用，
+    避免各处重复实现同一段字符串处理。
+    """
+    value = str(url)
+    if value.startswith("postgresql+psycopg://"):
+        return "postgresql://" + value.split("://", 1)[1]
+    return value
+
+
 def require_postgres_url(url: str | None, env_name: str) -> str:
     """返回可用的 PostgreSQL DSN；否则抛出带明确指名的错误。"""
     if not is_postgres_url(url):

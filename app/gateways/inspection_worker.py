@@ -27,6 +27,9 @@ class InspectionWorkerGateway:
     async def call(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return await self._unix.call(request)
 
+    async def aclose(self) -> None:
+        await self._unix.aclose()
+
 
 def create_inspection_worker_gateway(settings: Settings) -> InspectionWorkerGateway:
     return InspectionWorkerGateway(settings)

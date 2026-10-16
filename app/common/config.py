@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # PostgreSQL DSN）。生产与 robot-core 共用同一个 robot_platform 库，
     # 检测查询因此复用该 DSN 对应的共享 engine，不再单独配置第二个地址。
     database_url: str = ""
+    auto_migrate: bool = True
 
     # 鉴权（目标 API；默认关闭以保持旧前端联调契约，生产开启）
     auth_enabled: bool = False
@@ -43,6 +44,10 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = 14 * 24 * 3600
     default_admin_username: str = "admin"
     default_admin_password: str = "admin123"
+
+    # WebSocket 事件驱动推送：订阅 PostgreSQL NOTIFY 通道（robot_core 广播），
+    # 事件到达即刷新对应主题；关闭后仅保留 500ms 周期兜底推送。
+    ws_event_listener_enabled: bool = True
 
     @property
     def cors_origin_list(self) -> list[str]:

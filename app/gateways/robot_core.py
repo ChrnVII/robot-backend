@@ -27,6 +27,9 @@ class RobotCoreGateway:
     async def call(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return await self._unix.call(request)
 
+    async def aclose(self) -> None:
+        await self._unix.aclose()
+
 
 def create_robot_core_gateway(settings: Settings) -> RobotCoreGateway:
     return RobotCoreGateway(settings)

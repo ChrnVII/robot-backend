@@ -2,7 +2,7 @@
 
 设计说明：旧 Java UiApplicationService 以「Map 通用结构 + JSON 文件」存储工作台数据；
 本迁移保留同样的自由结构（payload JSON 列），确保前端契约零改动，同时落库持久化。
-设备、控制、媒体、推理相关表位于 robot_platform 库，由 robot-core 独占写入，此处不建表。
+控制表归 robot-core，媒体、巡检与推理表归感知进程；结构统一由 app.migrations 管理。
 """
 
 from sqlalchemy import JSON, Boolean, Integer, String, Text

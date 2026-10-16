@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.common.exceptions import ValidationFailed
+from app.contracts import Op
 from app.gateways.base import camelize
 from app.gateways.sensor_worker import SensorWorkerGateway
 from app.schemas.media import MediaCaptureRequest
@@ -21,7 +22,7 @@ class MediaService:
         if not matched:
             raise ValidationFailed("deviceId and mediaType do not match")
         return camelize(await self._gateway.call({
-            "operation": "capture",
+            "operation": Op.CAPTURE,
             "task_run_id": request.taskRunId,
             "waypoint_id": request.waypointId,
             "device_id": request.deviceId,

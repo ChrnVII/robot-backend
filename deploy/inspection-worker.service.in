@@ -1,6 +1,7 @@
 [Unit]
-Description=Inspection Robot Inspection Worker（实时巡检任务，单任务互斥）
+Description=Inspection Robot Perception Worker（采集 / 模型 / 巡检 / 媒体持久化）
 After=robot-core.service
+Conflicts=sensor-worker.service inference-worker.service
 
 [Service]
 Type=simple

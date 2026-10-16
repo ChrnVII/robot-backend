@@ -74,3 +74,27 @@ def test_results_degrade_to_empty_page_without_database():
         assert page["total"] == 0 and page["items"] == []
     finally:
         service.dispose()
+
+
+def test_read_contract_view_is_created_by_robot_core_schema():
+    """跨端读契约：检测分页依赖的视图由 robot_core 的 schema 脚本创建。
+
+    后端不直接依赖 inference_runs / media_assets 的表结构与结果图关联规则，
+    表结构演进只在 robot_core 侧修改视图定义。
+    """
+    store = PlatformStore(TEST_DSN)
+    try:
+        with store.connect() as connection:
+            row = connection.execute("SELECT to_regclass('v_inference_run_results') AS name").fetchone()
+            columns = {
+                item["column_name"] for item in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = 'v_inference_run_results'"
+                ).fetchall()
+            }
+    finally:
+        store.close()
+    assert row is not None and row["name"] is not None, "视图未随 schema 创建"
+    # 后端 _RESULT_SQL 依赖的列（新增列向后兼容，缺失列会立即暴露）
+    assert {"run_id", "request_id", "task_run_id", "result", "uri", "captured_at",
+            "result_asset_id", "result_uri", "result_mime_type"} <= columns

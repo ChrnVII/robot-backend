@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 
 from app.api.deps import get_workbench_service
+from app.common.exceptions import ValidationFailed
 from app.common.responses import ok, trace_of
 from app.services.workbench import WorkbenchService
 
@@ -158,7 +159,12 @@ def save_preset(
     body: dict[str, Any] = Body(default_factory=dict),
     service: WorkbenchService = Depends(get_workbench_service),
 ) -> dict:
-    return ok(service.save_preset(int(str(body.get("id")))), trace_of(request))
+    try:
+        preset_id = int(str(body.get("id")))
+    except (TypeError, ValueError) as exc:
+        # 自由 JSON 载荷下的必填字段校验：非法/缺失 id 应返回 400 而非兜底 500。
+        raise ValidationFailed("preset id must be an integer") from exc
+    return ok(service.save_preset(preset_id), trace_of(request))
 
 
 @router.delete("/cam/presets/{preset_id}", tags=["workbench"])

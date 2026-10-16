@@ -1,25 +1,34 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import random
 import threading
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Union
 
+from app.contracts import Channels, EventTopic
 from app.robot_core.common import new_id, parse_utc, utc_now
 from app.robot_core.contracts import CommandResult, ControlLease, DeviceCommand, DeviceState, Event
-from .db import PostgresConnectionPool, is_integrity_error, is_postgres_target
+from .db import PostgresConnectionPool, is_postgres_target
 
-# 目标 schema 版本。schema.sql 描述「完整目标结构」，_upgrade_existing_tables
-# 负责为已存在的老库补齐增量；两者都是幂等 DDL，因此只在版本落后时执行一次。
-SCHEMA_VERSION = 6
+logger = logging.getLogger(__name__)
+
+# Compatibility version for diagnostics; Alembic is the sole migration owner.
+SCHEMA_VERSION = 8
+
+#: PostgreSQL NOTIFY 通道（定义在共享契约核，后端 WS 事件监听订阅同一名称）。
+EVENTS_CHANNEL = Channels.EVENTS
 
 
 class PlatformStore:
     """Robot business store backed by PostgreSQL."""
 
-    def __init__(self, database_url: Union[str, Path], *, pool_options: Optional[Mapping[str, Any]] = None):
+    def __init__(self, database_url: Union[str, Path], *, pool_options: Optional[Mapping[str, Any]] = None,
+                 initialize: bool = True):
         if not is_postgres_target(database_url):
             raise ValueError(
                 "PlatformStore requires a PostgreSQL DSN, e.g. "
@@ -29,7 +38,12 @@ class PlatformStore:
         self._lock = threading.RLock()
         self._postgres_pool = PostgresConnectionPool(self.database_url, **dict(pool_options or {}))
         try:
-            self.initialize()
+            if initialize:
+                if os.environ.get("ROBOT_AUTO_MIGRATE", "true").lower() not in {"false", "0", "no"}:
+                    self.initialize()
+                else:
+                    from app.migrations import check_database
+                    check_database(self.database_url)
         except Exception:
             self.close()
             raise
@@ -51,94 +65,34 @@ class PlatformStore:
         return self._postgres_pool.connection()
 
     def initialize(self) -> None:
-        with self._lock, self.connect() as connection:
-            # Serialize first-time initialization across robot-core and
-            # sync-agent processes on the same PostgreSQL instance.
-            connection.execute("SELECT pg_advisory_xact_lock(hashtext('app.robot_core_schema_v1'))")
-            if self._applied_revision(connection) >= SCHEMA_VERSION:
-                # 结构已是最新：跳过整份 DDL（原实现对每次进程启动都重跑一遍 schema）。
-                return
-            schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-            connection.executescript(schema)
-            self._upgrade_existing_tables(connection)
-            connection.execute(
-                "INSERT INTO schema_revisions(version, applied_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                (SCHEMA_VERSION, utc_now()),
-            )
+        from app.migrations import upgrade_database
 
-    @staticmethod
-    def _applied_revision(connection) -> int:
-        """返回已应用的 schema 版本；全新库或早于版本表的老库返回 0。"""
-        exists = connection.execute("SELECT to_regclass('schema_revisions') AS name").fetchone()
-        if exists is None or exists["name"] is None:
-            return 0
-        row = connection.execute("SELECT max(version) AS version FROM schema_revisions").fetchone()
-        if row is None or row["version"] is None:
-            return 0
-        return int(row["version"])
-
-    @staticmethod
-    def _upgrade_existing_tables(connection) -> None:
-        """为既有数据库补齐完整目标结构所需的新增字段。"""
-        additions = {
-            "commands": {"task_run_id": "TEXT"},
-            "events": {"task_run_id": "TEXT", "aggregate_type": "TEXT", "aggregate_id": "TEXT"},
-            "inference_runs": {"model_sha256": "TEXT"},
-            "media_assets": {"cage_id": "TEXT"},
-            "outbox": {
-                "claim_token": "TEXT",
-                "claimed_at": "TEXT",
-                "last_attempt_at": "TEXT",
-                "remote_ack_at": "TEXT",
-                "delivery_count": "INTEGER NOT NULL DEFAULT 0",
-            },
-            "inbox": {"idempotency_key": "TEXT"},
-        }
-        for table, columns in additions.items():
-            existing = {
-                row["column_name"] for row in connection.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() AND table_name = ?", (table,)
-                ).fetchall()
-            }
-            for name, definition in columns.items():
-                if name not in existing:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_events_task_time ON events(task_run_id, occurred_at)")
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_aggregate_time "
-            "ON events(aggregate_type, aggregate_id, occurred_at)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_outbox_claims "
-            "ON outbox(state, next_retry_at, claimed_at, created_at)"
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency "
-            "ON inbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
-        )
-        # ---- v6：索引整备（老库补齐；全新库由 schema.sql 直接建好）----
-        # detection_id 本身已是主键，组合唯一约束 (request_id, detection_id) 完全冗余；
-        # 而 inference_detections 是写入量最大的表，每次插入都白付一次索引维护成本。
-        connection.execute(
-            "ALTER TABLE inference_detections "
-            "DROP CONSTRAINT IF EXISTS inference_detections_request_id_detection_id_key"
-        )
-        # 历史采样按 sampled_at DESC, received_at DESC 取最近 N 条；旧索引只有
-        # (device_id, sampled_at)，补成降序三列以消除排序。
-        connection.execute("DROP INDEX IF EXISTS idx_device_state_history_device_time")
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_device_state_history_device_time "
-            "ON device_state_history(device_id, sampled_at DESC, received_at DESC)"
-        )
-        # alerts 与 reviews 此前完全没有索引，按状态分页 / 按告警回查会全表扫描。
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_alerts_state_time ON alerts(state, created_at)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_alerts_trace ON alerts(trace_id)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_reviews_alert ON reviews(alert_id)")
+        upgrade_database(self.database_url)
 
     @staticmethod
     def _json(value: Mapping[str, Any]) -> str:
         return json.dumps(dict(value), ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _notify(connection, payload: Mapping[str, Any]) -> None:
+        """在事务内广播一条变更事件（提交时投递）。
+
+        使用 ``pg_notify()`` 函数而非 ``NOTIFY`` 语句：后者是工具语句，
+        PostgreSQL 不接受绑定参数，频道名必须字面量拼接。
+
+        NOTIFY 是「尽力而为」的实时性优化：后端 WS 仍保留周期兜底推送，
+        因此通知失败不影响业务写入，仅记录日志。
+        """
+        try:
+            connection.execute("SAVEPOINT notify_event")
+            connection.execute(
+                "SELECT pg_notify(?, ?)",
+                (EVENTS_CHANNEL, json.dumps(dict(payload), ensure_ascii=False)),
+            )
+            connection.execute("RELEASE SAVEPOINT notify_event")
+        except Exception:  # noqa: BLE001 - 通知失败不阻断业务事务
+            connection.execute("ROLLBACK TO SAVEPOINT notify_event")
+            logger.debug("notify %s failed", EVENTS_CHANNEL, exc_info=True)
 
     def save_lease(self, lease: ControlLease) -> None:
         with self.connect() as connection:
@@ -156,24 +110,15 @@ class PlatformStore:
 
     def save_command(self, command: DeviceCommand, state: str = "accepted", reject_reason: Optional[str] = None) -> bool:
         with self.connect() as connection:
-            try:
-                connection.execute(
+            row = connection.execute(
                     """INSERT INTO commands(command_id,idempotency_key,trace_id,issuer,lease_id,target,action,payload,state,issued_at,expires_at,reject_reason)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(idempotency_key) DO NOTHING RETURNING command_id""",
                     (command.command_id, command.idempotency_key, command.trace_id, command.issuer, command.lease_id,
                      command.target, command.action, self._json(command.payload), state, command.issued_at,
                      command.expires_at, reject_reason),
-                )
-                return True
-            except Exception as error:
-                if not is_integrity_error(error):
-                    raise
-                existing = connection.execute(
-                    "SELECT command_id FROM commands WHERE idempotency_key=?", (command.idempotency_key,)
                 ).fetchone()
-                if existing:
-                    return False
-                raise error
+            return row is not None
 
     def finish_command(self, result: CommandResult) -> None:
         with self.connect() as connection:
@@ -181,6 +126,8 @@ class PlatformStore:
                 "UPDATE commands SET state=?, completed_at=?, result=?, reject_reason=? WHERE command_id=?",
                 (result.state, result.completed_at, self._json(result.details), result.reject_reason, result.command_id),
             )
+            # 命令完成往往伴随设备状态变化：唤醒后端 state 主题立即刷新。
+            self._notify(connection, {"topic": EventTopic.STATE, "command_id": result.command_id})
 
     def command_by_idempotency_key(self, key: str) -> Optional[Dict[str, Any]]:
         with self.connect() as connection:
@@ -198,6 +145,47 @@ class PlatformStore:
                 "INSERT INTO events(event_id,event_type,source,trace_id,data,occurred_at) VALUES (?,?,?,?,?,?)",
                 (event.event_id, event.event_type, event.source, event.trace_id, self._json(event.data), event.occurred_at),
             )
+            self._enqueue_event(connection, event)
+
+    def _enqueue_event(self, connection, event: Event) -> None:
+        connection.execute(
+            """INSERT INTO outbox(outbox_id,aggregate_type,aggregate_id,event_type,payload,
+               idempotency_key,state,created_at) VALUES (?,?,?,?,?,?,'pending',?)
+               ON CONFLICT(idempotency_key) DO NOTHING""",
+            (new_id("outbox"), "robot", event.source, event.event_type,
+             self._json(asdict(event)), event.event_id, event.occurred_at),
+        )
+
+    def persist_emergency(self, payload: Mapping[str, Any]) -> None:
+        """Idempotently replay an emergency audit after control has already stopped."""
+        lease = payload["lease"]
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE control_leases SET released_at=?, release_reason='preempted' WHERE lease_id=?",
+                (lease["issued_at"], payload.get("previous_lease_id")),
+            )
+            connection.execute(
+                """INSERT INTO control_leases(lease_id,holder,mode,priority,issued_at,expires_at)
+                   VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING""",
+                tuple(lease[key] for key in ("lease_id", "holder", "mode", "priority", "issued_at", "expires_at")),
+            )
+            for command, result in zip(payload["commands"], payload["results"]):
+                connection.execute(
+                    """INSERT INTO commands(command_id,idempotency_key,trace_id,issuer,lease_id,
+                       target,action,payload,state,issued_at,expires_at,completed_at,result,reject_reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING""",
+                    (command["command_id"], command["idempotency_key"], command["trace_id"],
+                     command["issuer"], command["lease_id"], command["target"], command["action"],
+                     self._json(command["payload"]), result["state"], command["issued_at"],
+                     command["expires_at"], result["completed_at"], self._json(result["details"]), result["reject_reason"]),
+                )
+            event = Event(**payload["event"])
+            connection.execute(
+                "INSERT INTO events(event_id,event_type,source,trace_id,data,occurred_at) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                (event.event_id, event.event_type, event.source, event.trace_id, self._json(event.data), event.occurred_at),
+            )
+            self._enqueue_event(connection, event)
+            self._notify(connection, {"topic": EventTopic.STATE})
 
     def upsert_device_state(self, state: DeviceState) -> None:
         """Record a state sample and update the latest snapshot atomically."""
@@ -226,6 +214,8 @@ class PlatformStore:
                 (state.device_id, state.health.value, state.quality, self._json(state.values),
                  state.raw_fault_code, state.sampled_at, received_at, state.source),
             )
+            # 设备状态采样落库后唤醒后端对应主题（state 全量 + environment 专项）。
+            self._notify(connection, {"topic": EventTopic.STATE, "device_id": state.device_id})
 
     def device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
         with self.connect() as connection:
@@ -268,6 +258,7 @@ class PlatformStore:
         request_id = str(inference["request_id"])
         now = utc_now()
         with self.connect() as connection:
+            connection.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("inference:" + request_id,))
             existing = connection.execute("SELECT run_id FROM inference_runs WHERE request_id=?", (request_id,)).fetchone()
             if existing is not None:
                 count = connection.execute("SELECT count(*) AS count FROM inference_detections WHERE request_id=?", (request_id,)).fetchone()["count"]
@@ -280,11 +271,14 @@ class PlatformStore:
             run_id = new_id("infer")
             result = dict(inference.get("result", {}))
             connection.execute("""INSERT INTO inference_runs
-                (run_id,request_id,trace_id,capability,model_version,asset_id,task_run_id,status,result,model_sha256,error_stage,suggested_action,started_at,finished_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (run_id, request_id, inference.get("trace_id", new_id("trace")),
+                (run_id,request_id,trace_id,capability,model_version,asset_id,task_run_id,status,result,model_sha256,error_stage,suggested_action,started_at,finished_at,camera_id,frame_id,result_asset_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (run_id, request_id, inference.get("trace_id", new_id("trace")),
                 inference.get("capability", "unknown"), inference.get("model_version", "unknown"), original_asset["asset_id"],
                 original_asset["task_run_id"], inference.get("status", "internal_error"), self._json(result), inference.get("model_sha256"),
-                inference.get("error_stage"), inference.get("suggested_action"), inference.get("started_at", now), inference.get("finished_at", now)))
+                inference.get("error_stage"), inference.get("suggested_action"), inference.get("started_at", now), inference.get("finished_at", now),
+                inference.get("camera_id", original_asset.get("device_id")),
+                int(inference.get("frame_id", request_id.rsplit(":", 1)[-1] if request_id.rsplit(":", 1)[-1].isdigit() else 0)),
+                result_asset["asset_id"] if result_asset else None))
             count = 0
             for index, item in enumerate(detections):
                 bbox = list(item.get("bbox_xyxy", ()))
@@ -298,6 +292,8 @@ class PlatformStore:
                     str(item.get("label", "unknown")), item.get("class_id"), float(item.get("confidence", 0)),
                     float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]), now))
                 count += 1
+            # 逐帧推理结果落库后唤醒对应巡检/视频主题，客户端即时拿到新帧与检测。
+            self._notify(connection, {"topic": EventTopic.INSPECTION, "task_run_id": original_asset["task_run_id"]})
             return {"request_id": request_id, "run_id": run_id, "duplicate": False, "detection_count": count}
 
     def enqueue_outbox(self, aggregate_type: str, aggregate_id: str, event_type: str, payload: Mapping[str, Any], idempotency_key: str) -> str:
@@ -460,10 +456,10 @@ class PlatformStore:
             row = connection.execute(
                 """
                 SELECT * FROM inbox
-                WHERE remote_message_id=? OR (? IS NOT NULL AND idempotency_key=?)
+                WHERE remote_message_id=? OR idempotency_key=?
                 ORDER BY received_at LIMIT 1
                 """,
-                (remote_message_id, idempotency_key, idempotency_key),
+                (remote_message_id, idempotency_key),
             ).fetchone()
         if row is None:  # pragma: no cover - defensive guard for a broken database
             raise RuntimeError("inbox insert did not return a row")

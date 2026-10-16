@@ -27,6 +27,9 @@ class SensorWorkerGateway:
     async def call(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return await self._unix.call(request)
 
+    async def aclose(self) -> None:
+        await self._unix.aclose()
+
 
 def create_sensor_worker_gateway(settings: Settings) -> SensorWorkerGateway:
     return SensorWorkerGateway(settings)

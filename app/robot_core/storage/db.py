@@ -61,7 +61,9 @@ class PostgresConnection:
         translated = _qmark_to_pyformat(sql)
         items = list(params)
         values = items if (items and isinstance(items[0], Mapping)) else [tuple(item) for item in items]
-        return self._connection.executemany(translated, values)
+        cursor = self._connection.cursor()
+        cursor.executemany(translated, values)
+        return cursor
 
     def executescript(self, script: str) -> None:
         # The schema contains ordinary DDL statements only; comments and blank

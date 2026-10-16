@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Optional
 
 from app.robot_core.common import new_id, parse_utc, utc_now
@@ -20,24 +21,51 @@ class LeaseManager:
         self.store = store
         self.ttl_ms = ttl_ms
         self.current: Optional[ControlLease] = None
+        self._lock = Lock()
 
     def acquire(self, holder: str, mode: str) -> ControlLease:
         now = datetime.now(timezone.utc)
         priority = PRIORITIES[mode]
-        if self.current and parse_utc(self.current.expires_at) > now and priority <= self.current.priority:
-            raise LeaseConflict(f"control held by {self.current.holder}")
-        if self.current:
-            self.store.release_lease(self.current.lease_id, "preempted")
+        with self._lock:
+            previous = self.current
+            if previous and parse_utc(previous.expires_at) > now and priority <= previous.priority:
+                raise LeaseConflict(f"control held by {previous.holder}")
+        if previous:
+            self.store.release_lease(previous.lease_id, "preempted")
         lease = ControlLease(new_id("lease"), holder, mode, priority, now.isoformat(), (now + timedelta(milliseconds=self.ttl_ms)).isoformat())
         self.store.save_lease(lease)
-        self.current = lease
+        # A high-priority stop may preempt this acquisition while DB I/O runs.
+        with self._lock:
+            acquired = self.current is previous
+            if acquired:
+                self.current = lease
+        if not acquired:
+            self.store.release_lease(lease.lease_id, "preempted")
+            raise LeaseConflict("control changed while acquiring lease")
         return lease
 
+    def emergency_lease(self) -> tuple[ControlLease, Optional[ControlLease]]:
+        """Preempt immediately in memory; persistence is handled by the audit spool."""
+        now = datetime.now(timezone.utc)
+        lease = ControlLease(
+            new_id("lease"), "robot-core", "emergency", PRIORITIES["emergency"],
+            now.isoformat(), (now + timedelta(milliseconds=self.ttl_ms)).isoformat(),
+        )
+        with self._lock:
+            previous, self.current = self.current, lease
+        return lease, previous
+
     def validate(self, lease_id: str) -> bool:
-        return bool(self.current and self.current.lease_id == lease_id and parse_utc(self.current.expires_at) > parse_utc(utc_now()))
+        with self._lock:
+            current = self.current
+        return bool(current and current.lease_id == lease_id and parse_utc(current.expires_at) > parse_utc(utc_now()))
 
     def release(self, lease_id: str, reason: str = "released") -> None:
-        if self.current and self.current.lease_id == lease_id:
+        with self._lock:
+            previous = self.current
+        if previous and previous.lease_id == lease_id:
             self.store.release_lease(lease_id, reason)
-            self.current = None
+            with self._lock:
+                if self.current is previous:
+                    self.current = None
 

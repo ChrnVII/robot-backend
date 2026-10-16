@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.common.responses import error_response, trace_of
+from app.contracts import IpcErrorCode, is_not_found_code
 from app.gateways.base import InspectionWorkerError, RobotCoreError, SensorWorkerError
 
 logger = logging.getLogger(__name__)
@@ -91,8 +92,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_inspection_worker(request: Request, exc: InspectionWorkerError):
         if exc.code == "inspection_unavailable":
             status_code = 503
-        elif exc.code in ("KeyError", "FileNotFoundError"):
+        elif is_not_found_code(exc.code):
             status_code = 404
+        elif exc.code in (IpcErrorCode.INVALID_REQUEST, IpcErrorCode.UNSUPPORTED_OPERATION):
+            status_code = 400
         else:
             status_code = 409
         return error_response(_snake_upper(exc.code), str(exc), status_code, trace_id=trace_of(request))

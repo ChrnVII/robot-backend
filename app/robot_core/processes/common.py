@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
-from pathlib import Path
+import signal
 from typing import Awaitable, Callable
 
 from app.robot_core.common.config import PlatformConfig, load_config
@@ -29,8 +29,26 @@ def check_output(service: str, config: PlatformConfig, extra: dict) -> None:
 
 
 def run(coroutine: Callable[[], Awaitable[None]]) -> None:
+    async def supervise():
+        loop = asyncio.get_running_loop()
+        main_task = asyncio.current_task()
+        signals = []
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(signum, main_task.cancel)
+                signals.append(signum)
+            except NotImplementedError:  # Non-POSIX development environment.
+                pass
+        try:
+            await coroutine()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for signum in signals:
+                loop.remove_signal_handler(signum)
+
     try:
-        asyncio.run(coroutine())
+        asyncio.run(supervise())
     except KeyboardInterrupt:
         pass
 

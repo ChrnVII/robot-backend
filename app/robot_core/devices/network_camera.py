@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import math
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from urllib import error, parse, request
 from xml.sax.saxutils import escape
 
 from app.robot_core.common import utc_now
+from app.robot_core.common.camera_http import basic_auth_header, build_camera_opener
 from app.robot_core.contracts import CommandResult, DeviceCommand, DeviceState, HealthState
 
 
@@ -107,14 +107,10 @@ class NetworkCameraDriver:
                  opener: Optional[Callable[..., Any]] = None) -> None:
         self.device_id = device_id
         self.settings = settings
-        if opener is not None:
-            self._opener = opener
-        elif settings.auth_scheme == "digest" and settings.username is not None:
-            manager = request.HTTPPasswordMgrWithDefaultRealm()
-            manager.add_password(None, settings.base_url, settings.username, settings.password or "")
-            self._opener = request.build_opener(request.HTTPDigestAuthHandler(manager)).open
-        else:
-            self._opener = request.urlopen
+        # digest/basic 认证构造与采集侧共用同一实现（app.robot_core.common.camera_http）。
+        self._opener = build_camera_opener(
+            settings.base_url, settings.username, settings.password, settings.auth_scheme, opener
+        )
         self._opened = False
         self._last_values: dict[str, Any] = {}
 
@@ -123,9 +119,11 @@ class NetworkCameraDriver:
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json, image/jpeg"}
-        if self.settings.auth_scheme == "basic" and self.settings.username is not None:
-            token = f"{self.settings.username}:{self.settings.password or ''}".encode()
-            headers["Authorization"] = "Basic " + base64.b64encode(token).decode("ascii")
+        authorization = basic_auth_header(
+            self.settings.username, self.settings.password, self.settings.auth_scheme
+        )
+        if authorization is not None:
+            headers["Authorization"] = authorization
         return headers
 
     def _request_sync(self, path: str, payload: Any = None, *, method: Optional[str] = None) -> Any:

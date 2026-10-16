@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from app.robot_core.common import new_id
 from app.robot_core.common.config import PlatformConfig
+from app.robot_core.storage.runs import InspectionRunStore
+from .log_index import DetectionLogIndex
 
+logger = logging.getLogger(__name__)
 
 class InspectionService:
     """Controls one realtime inspection run and exposes its persisted evidence."""
@@ -15,7 +20,8 @@ class InspectionService:
     TERMINAL_STATES = {"completed", "stopped", "failed"}
     PIPELINES = {"inference", "passthrough"}
 
-    def __init__(self, config: PlatformConfig, run_function: Callable[..., Any]) -> None:
+    def __init__(self, config: PlatformConfig, run_function: Callable[..., Any],
+                 run_store: InspectionRunStore | None = None) -> None:
         self.config = config
         settings = config.values.get("inspection", {})
         configured_root = Path(str(settings.get("output_root", config.values["storage"]["media_root"])))
@@ -32,6 +38,40 @@ class InspectionService:
         self._latest_frame: dict[str, Any] | None = None
         self._latest_frames: dict[tuple[str, str], dict[str, Any]] = {}
         self._camera_errors: dict[str, dict[str, str]] = {}
+        self._run_store = run_store
+        self._log_index = DetectionLogIndex()
+        self._last_write = 0.0
+        self._persisted_state = None
+
+    def recover(self) -> None:
+        # Adopt old file-based runs and expose interrupted tasks using an existing state.
+        for path in self.output_root.glob("*/status.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError("checkpoint must be an object")
+                self._validate_id(str(value.get("task_run_id", "")), "task_run_id")
+            except (OSError, ValueError, TypeError):
+                logger.warning("ignoring invalid inspection checkpoint: %s", path, exc_info=True)
+                continue
+            task_run_id = value.get("task_run_id")
+            if not task_run_id:
+                continue
+            if value.get("state") not in self.TERMINAL_STATES:
+                value.update(state="failed", error="inspection worker restarted before task completion")
+            self._write_status(value, force=True)
+        if self._run_store is not None:
+            self._run_store.recover()
+
+    def close(self, timeout: float = 30.0) -> None:
+        with self._lock:
+            thread, stop = self._thread, self._stop_event
+            if stop is not None:
+                stop.set()
+        if thread is not None:
+            thread.join(timeout)
+            if thread.is_alive():
+                raise RuntimeError("inspection thread did not stop before shutdown deadline")
 
     def start(self, request: Mapping[str, Any]) -> dict[str, Any]:
         mode = str(request.get("mode", "single"))
@@ -66,6 +106,10 @@ class InspectionService:
                 raise RuntimeError("an inspection task is already running")
             if (self.output_root / task_run_id).exists():
                 raise ValueError("task_run_id already exists")
+            if self._run_store and self._run_store.status(task_run_id) is not None:
+                raise ValueError("task_run_id already exists")
+            self._latest_frame = None
+            self._latest_frames.clear()
             self._stop_event = threading.Event()
             self._active = {
                 "task_run_id": task_run_id,
@@ -77,7 +121,12 @@ class InspectionService:
                 "camera_ids": list(camera_ids),
                 "camera_count": camera_count,
             }
-            self._write_status(self._active)
+            try:
+                self._write_status(self._active, force=True)
+            except Exception:
+                self._active = None
+                self._stop_event = None
+                raise
             self._thread = threading.Thread(
                 target=self._run,
                 args=(task_run_id, mode, pipeline, duration_seconds, camera_ids),
@@ -95,6 +144,8 @@ class InspectionService:
                 if status.get("state") in self.TERMINAL_STATES:
                     return status
                 raise KeyError("inspection task is not active")
+            if self._active.get("state") in self.TERMINAL_STATES:
+                return dict(self._active)
             if self._stop_event is not None:
                 self._stop_event.set()
             self._active["state"] = "stopping"
@@ -111,6 +162,10 @@ class InspectionService:
                 return dict(self._active)
         if task_run_id is None:
             return {"state": "idle"}
+        if self._run_store is not None:
+            stored = self._run_store.status(task_run_id)
+            if stored is not None:
+                return stored
         task_root = self.output_root / task_run_id
         for name in ("summary.json", "status.json"):
             path = task_root / name
@@ -122,18 +177,17 @@ class InspectionService:
         self._validate_id(task_run_id, "task_run_id")
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
+        if self._run_store is not None and self._run_store.status(task_run_id) is not None:
+            result = self._run_store.detections(task_run_id, offset, limit)
+            if result["total"] or not (self.output_root / task_run_id / "inspection.jsonl").is_file():
+                return result
         log_path = self.output_root / task_run_id / "inspection.jsonl"
         items: list[dict[str, Any]] = []
         total = 0
         if log_path.is_file():
-            with log_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    event = json.loads(line)
-                    if event.get("event_type") not in {"detection", "inference"}:
-                        continue
-                    if offset <= total < offset + limit:
-                        items.append(self._public_event(event))
-                    total += 1
+            with self._lock:
+                events, total = self._log_index.page(log_path, offset, limit)
+            items = [self._public_event(event) for event in events]
         elif not (self.output_root / task_run_id).is_dir():
             raise KeyError("inspection task not found")
         return {"items": items, "offset": offset, "limit": limit, "total": total}
@@ -159,6 +213,14 @@ class InspectionService:
 
     def health(self) -> dict[str, Any]:
         return {"state": "ok", "active": self.status()}
+
+    def snapshot(self, task_run_id: str, *, camera_id: str | None = None,
+                 include_detections: bool = True) -> dict:
+        result = {"status": self.status(task_run_id), "frame": self.latest_frame(task_run_id, camera_id)}
+        if include_detections:
+            result["detections"] = self.detections(task_run_id, offset=0, limit=20)
+            result["frames"] = self.latest_frames(task_run_id)
+        return result
 
     def latest_frame(self, task_run_id: str, camera_id: str | None = None) -> dict[str, Any]:
         self._validate_id(task_run_id, "task_run_id")
@@ -209,10 +271,13 @@ class InspectionService:
                 if self._active is not None and self._active.get("state") not in self.TERMINAL_STATES:
                     self._update(task_run_id, mode, {"state": "completed"})
         except Exception as error:
-            self._update(task_run_id, mode, {
-                "state": "failed", "error": str(error),
-                "camera_errors": dict(self._camera_errors.get(task_run_id, {})),
-            })
+            try:
+                self._update(task_run_id, mode, {
+                    "state": "failed", "error": str(error),
+                    "camera_errors": dict(self._camera_errors.get(task_run_id, {})),
+                })
+            except Exception:
+                logger.exception("inspection failed; checkpoint retained for recovery: %s", task_run_id)
         finally:
             with self._lock:
                 self._camera_errors.pop(task_run_id, None)
@@ -228,6 +293,8 @@ class InspectionService:
             if current and current.get("task_run_id") != task_run_id:
                 return
             current.update(values)
+            if self._stop_event is not None and self._stop_event.is_set() and current.get("state") == "running":
+                current["state"] = "stopping"
             if "camera_errors" in values:
                 self._camera_errors[task_run_id] = dict(values.get("camera_errors") or {})
             current["task_run_id"] = task_run_id
@@ -243,13 +310,22 @@ class InspectionService:
             if camera_id:
                 self._latest_frames[(task_run_id, camera_id)] = frame
 
-    def _write_status(self, status: Mapping[str, Any]) -> None:
+    def _write_status(self, status: Mapping[str, Any], *, force: bool = False) -> None:
+        state = status.get("state")
+        if not force and state == self._persisted_state and time.monotonic() - self._last_write < 0.5:
+            return
         task_run_id = str(status["task_run_id"])
         task_root = self.output_root / task_run_id
         task_root.mkdir(parents=True, exist_ok=True)
         temporary = task_root / ".status.json.tmp"
         temporary.write_text(json.dumps(dict(status), ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(task_root / "status.json")
+        # Keep a recovery checkpoint even when the database write fails. The
+        # task fails visibly and restart replays this checkpoint before DB-only runs.
+        if self._run_store is not None:
+            self._run_store.save(status)
+        self._last_write = time.monotonic()
+        self._persisted_state = state
 
     @staticmethod
     def _public_event(event: Mapping[str, Any]) -> dict[str, Any]:

@@ -2,22 +2,27 @@
 
 迁移来源：InspectionApplicationService.java、InferenceQueryService.java。
 - InspectionService：经 inspection-worker 网关（IPC）；
-- InferenceQueryService：只读 robot_platform 库的推理记录（数据库不可用时返回空页）；
+- InferenceQueryService：通过只读视图查询推理记录，数据库故障使用统一错误封套；
   复用 app.db.database 的共享 engine，不再自建第二个连接池。
 """
 
 from __future__ import annotations
 
 import json
+import base64
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
 
+from app.contracts import Op
+from app.common.exceptions import AppError
 from app.db.database import get_engine
 from app.gateways.base import camelize
 from app.gateways.inspection_worker import InspectionWorkerGateway
@@ -36,7 +41,7 @@ class InspectionService:
 
     async def start(self, request: StartInspectionRequest) -> dict:
         value: dict[str, Any] = {
-            "operation": "start",
+            "operation": Op.TASK_START,
             "mode": request.mode,
             "pipeline": request.pipeline,
             "duration_seconds": request.durationSeconds,
@@ -49,7 +54,7 @@ class InspectionService:
 
     async def start_video_stream(self, request: StartVideoStreamRequest) -> dict:
         value: dict[str, Any] = {
-            "operation": "start",
+            "operation": Op.TASK_START,
             "mode": request.mode,
             "pipeline": "passthrough",
             "duration_seconds": request.durationSeconds,
@@ -61,28 +66,39 @@ class InspectionService:
         return camelize(await self._gateway.call(value))
 
     async def stop(self, task_run_id: str) -> dict:
-        return camelize(await self._gateway.call({"operation": "stop", "task_run_id": task_run_id}))
+        return camelize(await self._gateway.call({"operation": Op.TASK_STOP, "task_run_id": task_run_id}))
 
     async def status(self, task_run_id: str) -> dict:
-        return camelize(await self._gateway.call({"operation": "status", "task_run_id": task_run_id}))
+        return camelize(await self._gateway.call({"operation": Op.TASK_STATUS, "task_run_id": task_run_id}))
 
     async def detections(self, task_run_id: str, offset: int, limit: int) -> dict:
         return camelize(await self._gateway.call({
-            "operation": "detections", "task_run_id": task_run_id, "offset": offset, "limit": limit,
+            "operation": Op.TASK_DETECTIONS, "task_run_id": task_run_id, "offset": offset, "limit": limit,
         }))
 
     async def latest_frame(self, task_run_id: str, camera_id: str | None = None) -> dict:
-        request: dict[str, Any] = {"operation": "latest_frame", "task_run_id": task_run_id}
+        request: dict[str, Any] = {"operation": Op.TASK_LATEST_FRAME, "task_run_id": task_run_id}
         if camera_id:
             request["camera_id"] = camera_id
-        return camelize(await self._gateway.call(request))
+        value = await self._gateway.call(request)
+        return camelize(await asyncio.to_thread(_render_frames, value))
 
     async def latest_frames(self, task_run_id: str) -> dict:
-        return camelize(await self._gateway.call({"operation": "latest_frames", "task_run_id": task_run_id}))
+        value = await self._gateway.call({"operation": Op.TASK_LATEST_FRAMES, "task_run_id": task_run_id})
+        return camelize(await asyncio.to_thread(_render_frames, value))
+
+    async def snapshot(self, task_run_id: str, *, camera_id: str | None = None,
+                       include_detections: bool = True) -> dict:
+        request = {"operation": Op.TASK_SNAPSHOT, "task_run_id": task_run_id,
+                   "include_detections": include_detections}
+        if camera_id:
+            request["camera_id"] = camera_id
+        value = await self._gateway.call(request)
+        return camelize(await asyncio.to_thread(_render_frames, value))
 
     async def resolve_image(self, task_run_id: str, image_id: str) -> ResolvedImage:
         value = await self._gateway.call({
-            "operation": "resolve_image", "task_run_id": task_run_id, "image_id": image_id,
+            "operation": Op.TASK_RESOLVE_IMAGE, "task_run_id": task_run_id, "image_id": image_id,
         })
         return ResolvedImage(
             path=Path(str(value.get("path"))).absolute(),
@@ -92,30 +108,41 @@ class InspectionService:
 
 _RESULT_SQL = text(
     """
-    SELECT ir.run_id, ir.request_id, ir.task_run_id, ir.trace_id, ir.capability,
-           ir.model_version, ir.model_sha256, ir.status, ir.result,
-           ir.started_at, ir.finished_at, ma.asset_id, ma.uri, ma.mime_type,
-           ma.sha256, ma.size_bytes, ma.captured_at,
-           ma2.asset_id AS result_asset_id, ma2.uri AS result_uri,
-           ma2.mime_type AS result_mime_type
-    FROM inference_runs ir
-    JOIN media_assets ma ON ma.asset_id = ir.asset_id
-    LEFT JOIN media_assets ma2 ON ma2.task_run_id = ir.task_run_id
-      AND ma2.device_id = ma.device_id AND ma2.media_type = 'image'
-      AND ma2.uri LIKE '%_result.jpg' AND ma2.captured_at = ma.captured_at
-    WHERE ir.task_run_id = :task_run_id
-    ORDER BY ir.finished_at DESC, ir.run_id DESC
+    SELECT run_id, request_id, task_run_id, trace_id, capability,
+           model_version, model_sha256, status, result,
+           started_at, finished_at, asset_id, uri, mime_type,
+           sha256, size_bytes, captured_at,
+           result_asset_id, result_uri, result_mime_type
+    FROM v_inference_run_results
+    WHERE task_run_id = :task_run_id
+    ORDER BY finished_at DESC, run_id DESC
     LIMIT :limit OFFSET :offset
     """
 )
 
 _DETECTION_SQL = text(
     """
-    SELECT detection_id, camera_id, frame_id, label, class_id, confidence,
+    SELECT request_id, detection_id, camera_id, frame_id, label, class_id, confidence,
            x0, y0, x1, y1, created_at
-    FROM inference_detections WHERE request_id = :request_id ORDER BY detection_id
+    FROM v_inference_detections WHERE request_id IN :request_ids ORDER BY detection_id
     """
-)
+).bindparams(bindparam("request_ids", expanding=True))
+
+
+def _render_frames(value: Any, cache: dict[str, str] | None = None) -> Any:
+    """Keep the public Base64 contract while internal IPC transfers small references."""
+    cache = {} if cache is None else cache
+    if isinstance(value, dict):
+        result = {key: _render_frames(item, cache) for key, item in value.items() if key != "jpeg_path"}
+        path = value.get("jpeg_path")
+        if path:
+            if path not in cache:
+                cache[path] = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+            result["jpeg_base64"] = cache[path]
+        return result
+    if isinstance(value, list):
+        return [_render_frames(item, cache) for item in value]
+    return value
 
 
 class InferenceQueryService:
@@ -145,19 +172,22 @@ class InferenceQueryService:
         try:
             with self._get_engine().connect() as connection:
                 total = connection.execute(
-                    text("SELECT count(*) FROM inference_runs WHERE task_run_id=:task_run_id"),
+                    text("SELECT count(*) FROM v_inference_run_results WHERE task_run_id=:task_run_id"),
                     {"task_run_id": task_run_id},
                 ).scalar() or 0
                 rows = connection.execute(
                     _RESULT_SQL,
                     {"task_run_id": task_run_id, "offset": safe_offset, "limit": safe_limit},
                 ).mappings().all()
-                items = [self._to_public_item(connection, row) for row in rows]
-        except Exception:  # noqa: BLE001 - 数据库缺失/未运行 robot-core 时返回空页
-            return {"items": [], "offset": safe_offset, "limit": safe_limit, "total": 0}
+                grouped = self._detections(connection, [str(row["request_id"]) for row in rows])
+                items = [self._to_public_item(row, grouped.get(str(row["request_id"]), [])) for row in rows]
+        except SQLAlchemyError as error:
+            if getattr(getattr(error, "orig", None), "sqlstate", None) == "42P01":
+                return {"items": [], "offset": safe_offset, "limit": safe_limit, "total": 0}
+            raise AppError("Detection results are temporarily unavailable") from error
         return {"items": items, "offset": safe_offset, "limit": safe_limit, "total": int(total)}
 
-    def _to_public_item(self, connection, row) -> dict[str, Any]:
+    def _to_public_item(self, row, detections: list[dict]) -> dict[str, Any]:
         request_id = str(row["request_id"])
         camera_id, frame_text = _parse_identity(request_id, row["task_run_id"])
         frame_id = _parse_int(frame_text)
@@ -177,7 +207,7 @@ class InferenceQueryService:
             "cameraId": camera_id,
             "frameId": frame_id,
             "latencyMs": _number(result.get("latency_ms"), result.get("latencyMs")),
-            "detections": self._detections(connection, request_id),
+            "detections": detections,
             "countByLabel": result.get("count_by_label", result.get("countByLabel", {})),
             "result": camelize(result),
             "assetId": row["asset_id"],
@@ -194,10 +224,13 @@ class InferenceQueryService:
         return item
 
     @staticmethod
-    def _detections(connection, request_id: str) -> list[dict[str, Any]]:
-        rows = connection.execute(_DETECTION_SQL, {"request_id": request_id}).mappings().all()
-        return [
-            {
+    def _detections(connection, request_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        if not request_ids:
+            return {}
+        rows = connection.execute(_DETECTION_SQL, {"request_ids": request_ids}).mappings().all()
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["request_id"]), []).append({
                 "detectionId": row["detection_id"],
                 "cameraId": row["camera_id"],
                 "frameId": row["frame_id"],
@@ -206,9 +239,8 @@ class InferenceQueryService:
                 "confidence": row["confidence"],
                 "x0": row["x0"], "y0": row["y0"], "x1": row["x1"], "y1": row["y1"],
                 "createdAt": row["created_at"],
-            }
-            for row in rows
-        ]
+            })
+        return grouped
 
 
 def _parse_identity(request_id: str, task_run_id: str | None) -> tuple[str, str]:

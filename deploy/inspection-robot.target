@@ -1,6 +1,6 @@
 [Unit]
-Description=Inspection Robot Platform（五进程 + FastAPI 后端）
-Wants=robot-core.service sensor-worker.service inference-worker.service inspection-worker.service backend.service sync-agent.service
+Description=Inspection Robot Platform（控制 + 感知巡检 + FastAPI）
+Wants=robot-core.service inspection-worker.service backend.service
 After=robot-core.service
 
 [Install]

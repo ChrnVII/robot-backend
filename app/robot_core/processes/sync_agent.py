@@ -14,9 +14,12 @@ def main() -> None:
     args = parser("sync-agent").parse_args()
     config = load_config(args.config)
     configure_logging(config, "sync-agent")
-    store = PlatformStore(config.database_url, pool_options=config.database_pool_options)
-    enabled = bool(config.values["sync"]["enabled"])
+    store = PlatformStore(config.database_url_for("sync"), pool_options=config.database_pool_options,
+                          initialize=not args.check)
+    enabled = config.sync_enabled
     if args.check:
+        from app.migrations import check_database
+        check_database(store.database_url)
         check_output("sync-agent", config, {"enabled": enabled, "pending": len(list(store.pending_outbox()))})
         store.close()
         return

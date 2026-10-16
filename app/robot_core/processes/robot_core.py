@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
+from app.contracts import (
+    CommandWire,
+    EmergencyStopWire,
+    LeaseAcquireWire,
+    LeaseReleaseWire,
+    Op,
+)
 from app.robot_core.common.config import load_config
 from app.robot_core.contracts import DeviceCommand
 from app.robot_core.core import RobotCore
@@ -17,7 +25,7 @@ from .common import check_output, configure_logging, parser, run
 
 
 def build(config):
-    store = PlatformStore(config.database_url, pool_options=config.database_pool_options)
+    store = PlatformStore(config.database_url_for("core"), pool_options=config.database_pool_options, initialize=False)
     devices = {name: SimulatedDeviceDriver(name) for name in ("motion", "battery", "rfid", "track", "environment", "lift", "light", "camera")}
     devices["environment"] = SimulatedDeviceDriver("environment", {
         "temperature_c": 24.8,
@@ -45,7 +53,8 @@ def build(config):
         )
     safety = config.values["safety"]
     core = RobotCore(store, devices, lease_ttl_ms=int(safety["lease_ttl_ms"]),
-                     max_motion_distance_m=float(safety["max_motion_distance_m"]))
+                     max_motion_distance_m=float(safety["max_motion_distance_m"]),
+                     audit_directory=config.path("storage", "media_root").parent / "emergency-audit")
     core._poll_interval_seconds = float(
         config.values.get("devices", {}).get("environment", {}).get("poll_interval_seconds", 5.0)
     )
@@ -58,6 +67,8 @@ def main() -> None:
     configure_logging(config, "robot-core")
     core = build(config)
     if args.check:
+        from app.migrations import check_database
+        check_database(core.store.database_url)
         check_output("robot-core", config, {"database": config.database_display_url, "devices": list(core.devices)})
         core.store.close()
         return
@@ -67,34 +78,42 @@ def main() -> None:
 
         async def handler(request):
             operation = request.get("operation")
-            if operation == "health":
+            if operation == Op.HEALTH:
                 return await core.health()
-            if operation == "device.state":
+            if operation == Op.DEVICE_STATE:
                 return core.device_state(str(request["device_id"]))
-            if operation == "lease.acquire":
-                return asdict(core.leases.acquire(str(request["holder"]), str(request["mode"])))
-            if operation == "lease.release":
-                core.leases.release(str(request["lease_id"]), str(request.get("reason", "released")))
+            if operation == Op.LEASE_ACQUIRE:
+                lease = LeaseAcquireWire.from_mapping(request)
+                return asdict(await asyncio.to_thread(core.leases.acquire, lease.holder, lease.mode))
+            if operation == Op.LEASE_RELEASE:
+                release = LeaseReleaseWire.from_mapping(request)
+                await asyncio.to_thread(core.leases.release, release.lease_id, release.reason)
                 return {"released": True}
-            if operation == "emergency.stop":
-                await core.emergency_stop(str(request.get("reason", "requested")), str(request["trace_id"]))
+            if operation == Op.EMERGENCY_STOP:
+                stop = EmergencyStopWire.from_mapping(request)
+                await core.emergency_stop(stop.reason, stop.trace_id)
                 return {"state": core.state}
-            if operation == "asset.register":
+            if operation == Op.ASSET_REGISTER:
                 asset = dict(request["asset"])
-                core.store.register_asset(asset)
+                await asyncio.to_thread(core.store.register_asset, asset)
                 return {"asset_id": asset["asset_id"], "registered": True}
-            if operation == "inspection.persist":
-                return core.store.persist_inference_result(
+            if operation == Op.INSPECTION_PERSIST:
+                return await asyncio.to_thread(core.store.persist_inference_result,
                     original_asset=request["original_asset"], result_asset=request.get("result_asset"),
                     inference=request["inference"], detections=request.get("detections", []))
-            if operation == "command":
+            if operation == Op.COMMAND:
                 now = datetime.now(timezone.utc)
                 ttl = int(config.values["safety"]["default_command_ttl_ms"])
+                wire = CommandWire.from_mapping(
+                    request,
+                    default_issued_at=now.isoformat(),
+                    default_expires_at=(now + timedelta(milliseconds=ttl)).isoformat(),
+                )
                 command = DeviceCommand(
-                    target=str(request["target"]), action=str(request["action"]), payload=dict(request.get("payload", {})),
-                    issuer=str(request["issuer"]), lease_id=str(request["lease_id"]), issued_at=str(request.get("issued_at", now.isoformat())),
-                    expires_at=str(request.get("expires_at", (now + timedelta(milliseconds=ttl)).isoformat())),
-                    idempotency_key=str(request["idempotency_key"]), trace_id=str(request["trace_id"]),
+                    target=wire.target, action=wire.action, payload=dict(wire.payload),
+                    issuer=wire.issuer, lease_id=wire.lease_id,
+                    issued_at=wire.issued_at, expires_at=wire.expires_at,
+                    idempotency_key=wire.idempotency_key, trace_id=wire.trace_id,
                 )
                 return asdict(await core.execute(command))
             raise ValueError("unsupported operation")

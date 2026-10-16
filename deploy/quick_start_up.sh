@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# quick_start_up.sh —— 手动快速启动整个后端（robot-core 五进程 + FastAPI）。
+# quick_start_up.sh —— 手动启动控制、感知与 FastAPI 三进程（同步可选）。
 # 调试/验证用；生产环境建议使用 systemd（deploy/*.service + inspection-robot.target）。
 #
 # 用法:
@@ -142,14 +142,43 @@ do_check() {
   log "冒烟检查通过"
 }
 
+prepare_database() {
+  case "${ROBOT_AUTO_MIGRATE:-true}" in
+    false|False|FALSE|0|no|NO) ;;
+    *) .venv/bin/python -m app.robot_core.storage.migrate --config "$CONFIG" upgrade ;;
+  esac
+  .venv/bin/python -m app.robot_core.storage.migrate --config "$CONFIG" check
+}
+
+sync_enabled() {
+  .venv/bin/python -c 'import sys; from app.robot_core.common.config import load_config; sys.exit(0 if load_config(sys.argv[1]).sync_enabled else 1)' "$CONFIG"
+}
+
+stop_component() {
+  local name="$1" pid i
+  if ! pid="$(pid_of "$name")"; then return; fi
+  kill "$pid" 2>/dev/null || true
+  for i in $(seq 1 80); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$RUN_DIR/$name.pid"
+      log "$name 已停止"
+      return
+    fi
+    sleep 0.5
+  done
+  die "$name 未在 40 秒内退出，请查看日志后处理 (pid $pid)"
+}
+
 do_install() {
   # 渲染 systemd 单元模板（按当前目录/用户/端口）→ /etc/systemd/system 并启动。
   # 项目挪位置、换用户、换端口后，重新执行一次本命令即可。
   if [ ! -f "$ENV_FILE" ]; then
     die "未找到 $ENV_FILE：请先 cp robot.env.example robot.env 并填写"
   fi
+  load_env
   ensure_venv
   mkdir -p "$LOG_DIR" data run
+  prepare_database
   local service_user="${SERVICE_USER:-${SUDO_USER:-$USER}}" staged
   staged="$(mktemp -d)"
   for unit in deploy/*.service.in; do
@@ -161,8 +190,15 @@ do_install() {
   sudo cp "$staged"/*.service deploy/inspection-robot.target /etc/systemd/system/
   rm -rf "$staged"
   sudo systemctl daemon-reload
+  sudo systemctl disable --now sensor-worker.service inference-worker.service || true
   sudo systemctl enable --now inspection-robot.target \
     || warn "启动失败，查看: journalctl -u backend -e"
+  sudo systemctl restart robot-core.service inspection-worker.service backend.service
+  if sync_enabled; then
+    sudo systemctl enable --now sync-agent.service
+  else
+    sudo systemctl disable --now sync-agent.service || true
+  fi
   log "systemd 单元已按 $PROJECT_DIR 渲染并启动（服务用户: $service_user）"
 }
 
@@ -170,35 +206,33 @@ do_start() {
   load_env
   ensure_venv
   mkdir -p "$LOG_DIR" data run
+  prepare_database
   log "冒烟检查…"
   .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
 
   start_component robot_core        app.robot_core.processes.robot_core
   wait_for_socket
-  start_component sensor_worker     app.robot_core.processes.sensor_worker
-  start_component inference_worker  app.robot_core.processes.inference_worker
+  stop_component sensor_worker
+  stop_component inference_worker
   start_component inspection_worker app.robot_core.processes.inspection_worker
-  start_component sync_agent        app.robot_core.processes.sync_agent
+  # inspection-worker also serves sensor-worker.sock and owns the sole model.
+  if sync_enabled; then
+    start_component sync_agent app.robot_core.processes.sync_agent
+  else
+    stop_component sync_agent
+  fi
   start_backend
   wait_for_health
   log "全部组件已启动。前端地址: http://<机器人IP>:${BACKEND_PORT}"
 }
 
 do_stop() {
-  local name pid stopped=0
+  local name
   # 与启动相反的顺序停止
   for name in backend sync_agent inspection_worker inference_worker sensor_worker robot_core; do
-    if pid="$(pid_of "$name")"; then
-      kill "$pid" 2>/dev/null || true
-      log "$name 已发送停止信号 (pid $pid)"
-      stopped=1
-    fi
+    stop_component "$name"
   done
-  # 兜底：清理未写入 pid 文件的残留进程
-  pkill -f "app.robot_core.processes" 2>/dev/null || true
-  pkill -f "uvicorn app.main:app" 2>/dev/null || true
   rm -f "$RUN_DIR"/*.pid
-  [ "$stopped" = 1 ] || log "没有在运行的组件"
 }
 
 do_status() {

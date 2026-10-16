@@ -53,3 +53,27 @@ def test_invalid_camera_id_closes_with_bad_data(client):
         with pytest.raises(WebSocketDisconnect) as excinfo:
             websocket.receive_json()
     assert excinfo.value.code == 1007
+
+
+def test_ws_requires_token_when_auth_enabled(auth_client):
+    """鉴权开启时，无令牌的 WS 连接以 1008（策略违规）关闭。"""
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with auth_client.websocket_connect("/ws/state") as websocket:
+            websocket.receive_json()
+    assert excinfo.value.code == 1008
+
+
+def test_ws_rejects_invalid_token(auth_client):
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with auth_client.websocket_connect("/ws/state?accessToken=not-a-token") as websocket:
+            websocket.receive_json()
+    assert excinfo.value.code == 1008
+
+
+def test_ws_accepts_valid_access_token(auth_client):
+    token = auth_client.post(
+        "/api/v1/auth/login", json={"username": "admin", "password": "admin123"}
+    ).json()["data"]["accessToken"]
+    with auth_client.websocket_connect(f"/ws/state?accessToken={token}") as websocket:
+        message = websocket.receive_json()
+    assert message["type"] == "state"

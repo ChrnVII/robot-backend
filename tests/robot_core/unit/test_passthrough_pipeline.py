@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.robot_core.common.config import PlatformConfig
-from app.robot_core.processes import realtime_demo
+from app.robot_core.processes import inspection_engine
 
 
 class _Reader:
@@ -39,10 +39,10 @@ class PassthroughPipelineTest(unittest.TestCase):
             )
             reader = _Reader()
             frames = []
-            with patch.object(realtime_demo, "build_camera_reader", return_value=reader), \
-                    patch.object(realtime_demo, "_encode_jpeg_base64", return_value="raw-jpeg"), \
-                    patch.object(realtime_demo, "InferenceRuntime", side_effect=AssertionError("inference must be bypassed")):
-                summary = realtime_demo.run(
+            with patch.object(inspection_engine, "build_camera_reader", return_value=reader), \
+                    patch.object(inspection_engine, "_encode_jpeg_base64", return_value="raw-jpeg"), \
+                    patch.object(inspection_engine, "InferenceRuntime", side_effect=AssertionError("inference must be bypassed")):
+                summary = inspection_engine.run(
                     config,
                     mode="single",
                     pipeline="passthrough",
@@ -79,8 +79,8 @@ class PassthroughPipelineTest(unittest.TestCase):
             def fail_to_read():
                 raise RuntimeError("stream unavailable: rtsp://operator:private@192.168.137.64:554/Streaming/Channels/101")
 
-            with patch.object(realtime_demo, "build_camera_reader", return_value=fail_to_read):
-                summary = realtime_demo.run(
+            with patch.object(inspection_engine, "build_camera_reader", return_value=fail_to_read):
+                summary = inspection_engine.run(
                     config, mode="single", pipeline="passthrough", task_run_id="stream-fail",
                     duration_seconds=0, headless=True,
                 )

@@ -62,6 +62,10 @@ class UnixCaller:
         except Exception as exc:  # noqa: BLE001 - 与旧 Java 网关 getMessage 包装保持一致
             raise self._error_cls(self._unavailable_code, f"{self._label} call failed: {exc}") from exc
 
+    async def aclose(self) -> None:
+        """释放底层 IPC 连接池（应用关闭时调用）。"""
+        await self._client.aclose()
+
 
 def to_camel(key: str) -> str:
     """snake_case -> camelCase（对齐旧 Java JsonNames.toCamelCase）。"""

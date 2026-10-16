@@ -1,7 +1,7 @@
 [project]
 name = "backend"
 version = "0.2.0"
-description = "巡检机器人业务后端（FastAPI）+ 机器人运行时（robot_core 五进程）"
+description = "巡检机器人业务后端（FastAPI）+ 控制与感知运行时"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.141.1",
@@ -11,15 +11,16 @@ dependencies = [
     "networkx>=3.2,<4",
     "psycopg[binary]>=3.2,<4",
     "psycopg-pool>=3.2,<4",
+    "alembic>=1.14,<2",
 ]
 
 [dependency-groups]
 dev = ["pytest>=8,<9"]
 # 硬件设备能力（串口等），robot-core 使用
 hardware = ["pyserial>=3.5,<4", "pyserial-asyncio>=0.6,<1"]
-# 媒体采集能力（相机 / 音频），sensor-worker 使用
+# 媒体采集能力（相机 / 音频），感知进程使用
 media = ["opencv-python-headless>=4.9,<5", "sounddevice>=0.4,<1"]
-# 模型推理能力（torch / ultralytics），inference-worker 使用
+# 模型推理能力（torch / ultralytics），感知进程使用
 inference = ["torch>=2.2,<3", "ultralytics>=8.3,<9"]
 
 [tool.uv]
@@ -30,6 +31,9 @@ default-groups = ["dev", "hardware", "media", "inference"]
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "no_database: 纯单元用例，不依赖 PostgreSQL（契约核 / WS 中枢 / IPC 帧协议）",
+]
 
 [tool.fastapi]
 entrypoint = "app.main:app"

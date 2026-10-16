@@ -1,8 +1,12 @@
-"""工作台数据访问（ui_* 表）：写操作显式提交，返回纯 dict 载荷（保持旧前端契约）。"""
+"""工作台数据访问（ui_* 表）：写操作显式提交，返回纯 dict 载荷（保持旧前端契约）。
+
+四类同构实体（任务 / 模板 / 运行 / 告警）此前各自手写 list/upsert/delete 样板，
+现经泛型辅助函数收敛；对外函数签名保持不变，service 层无需感知实现变化。
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,10 +23,46 @@ from app.db.models import (
 )
 
 
+def _payloads(session: Session, model: Any) -> list[dict[str, Any]]:
+    """返回全表 payload 列表（工作台接口的统一返回形态）。"""
+    return [dict(row.payload or {}) for row in session.scalars(select(model)).all()]
+
+
+def _upsert_payload(
+    session: Session,
+    model: Any,
+    key_name: str,
+    key_value: Any,
+    payload: dict[str, Any],
+    *,
+    create_only: Mapping[str, Any] | None = None,
+    update: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """按主键 upsert 一行 payload 实体；create_only 字段仅新建时写入。"""
+    row = session.get(model, key_value)
+    if row is None:
+        row = model(**{key_name: key_value, **(create_only or {})})
+        session.add(row)
+    row.payload = payload
+    for name, value in (update or {}).items():
+        setattr(row, name, value)
+    session.commit()
+    return dict(row.payload or {})
+
+
+def _delete_row(session: Session, model: Any, key_value: Any) -> bool:
+    row = session.get(model, key_value)
+    if row is None:
+        return False
+    session.delete(row)
+    session.commit()
+    return True
+
+
 # ---------- tasks ----------
 
 def list_tasks(session: Session) -> list[dict[str, Any]]:
-    return [dict(row.payload or {}) for row in session.scalars(select(TaskRecord)).all()]
+    return _payloads(session, TaskRecord)
 
 
 def get_task(session: Session, task_id: str) -> TaskRecord | None:
@@ -31,57 +71,40 @@ def get_task(session: Session, task_id: str) -> TaskRecord | None:
 
 def upsert_task(session: Session, task_id: str, payload: dict[str, Any], enabled: bool,
                 created_at: str, updated_at: str) -> dict[str, Any]:
-    row = session.get(TaskRecord, task_id)
-    if row is None:
-        row = TaskRecord(task_id=task_id, created_at=created_at)
-        session.add(row)
-    row.payload = payload
-    row.enabled = enabled
-    row.updated_at = updated_at
-    session.commit()
-    return dict(row.payload or {})
+    return _upsert_payload(
+        session, TaskRecord, "task_id", task_id, payload,
+        create_only={"created_at": created_at},
+        update={"enabled": enabled, "updated_at": updated_at},
+    )
 
 
 def delete_task(session: Session, task_id: str) -> bool:
-    row = session.get(TaskRecord, task_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    return _delete_row(session, TaskRecord, task_id)
 
 
 # ---------- task templates ----------
 
 def list_templates(session: Session) -> list[dict[str, Any]]:
-    return [dict(row.payload or {}) for row in session.scalars(select(TaskTemplate)).all()]
+    return _payloads(session, TaskTemplate)
 
 
 def upsert_template(session: Session, template_id: str, payload: dict[str, Any],
                     created_at: str, updated_at: str) -> dict[str, Any]:
-    row = session.get(TaskTemplate, template_id)
-    if row is None:
-        row = TaskTemplate(template_id=template_id, created_at=created_at)
-        session.add(row)
-    row.payload = payload
-    row.updated_at = updated_at
-    session.commit()
-    return dict(row.payload or {})
+    return _upsert_payload(
+        session, TaskTemplate, "template_id", template_id, payload,
+        create_only={"created_at": created_at},
+        update={"updated_at": updated_at},
+    )
 
 
 def delete_template(session: Session, template_id: str) -> bool:
-    row = session.get(TaskTemplate, template_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    return _delete_row(session, TaskTemplate, template_id)
 
 
 # ---------- runs ----------
 
 def list_runs(session: Session) -> list[dict[str, Any]]:
-    return [dict(row.payload or {}) for row in session.scalars(select(UiRun)).all()]
+    return _payloads(session, UiRun)
 
 
 def get_run(session: Session, run_id: str) -> UiRun | None:
@@ -95,32 +118,24 @@ def find_run_by_task(session: Session, task_id: str) -> UiRun | None:
 
 def upsert_run(session: Session, run_id: str, task_id: str | None, status: int,
                payload: dict[str, Any], created_at: str, updated_at: str) -> dict[str, Any]:
-    row = session.get(UiRun, run_id)
-    if row is None:
-        row = UiRun(run_id=run_id, task_id=task_id, created_at=created_at)
-        session.add(row)
+    update: dict[str, Any] = {"status": status, "updated_at": updated_at}
     if task_id is not None:
-        row.task_id = task_id
-    row.status = status
-    row.payload = payload
-    row.updated_at = updated_at
-    session.commit()
-    return dict(row.payload or {})
+        update["task_id"] = task_id
+    return _upsert_payload(
+        session, UiRun, "run_id", run_id, payload,
+        create_only={"task_id": task_id, "created_at": created_at},
+        update=update,
+    )
 
 
 def delete_run(session: Session, run_id: str) -> bool:
-    row = session.get(UiRun, run_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    return _delete_row(session, UiRun, run_id)
 
 
 # ---------- alerts ----------
 
 def list_alerts(session: Session) -> list[dict[str, Any]]:
-    return [dict(row.payload or {}) for row in session.scalars(select(UiAlert)).all()]
+    return _payloads(session, UiAlert)
 
 
 def get_or_create_alert(session: Session, alert_id: str) -> UiAlert:
@@ -151,12 +166,7 @@ def save_alert(session: Session, row: UiAlert, payload: dict[str, Any], *, level
 
 
 def delete_alert(session: Session, alert_id: str) -> bool:
-    row = session.get(UiAlert, alert_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    return _delete_row(session, UiAlert, alert_id)
 
 
 # ---------- presets ----------
@@ -185,12 +195,7 @@ def save_preset(session: Session, row: Preset, payload: dict[str, Any], name: st
 
 
 def delete_preset(session: Session, preset_id: int) -> bool:
-    row = session.get(Preset, preset_id)
-    if row is None:
-        return False
-    session.delete(row)
-    session.commit()
-    return True
+    return _delete_row(session, Preset, preset_id)
 
 
 # ---------- config (kv) ----------

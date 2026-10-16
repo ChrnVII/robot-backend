@@ -1,3 +1,14 @@
+"""巡检任务执行引擎（inspection-worker 的唯一任务运行体）。
+
+本模块原名 ``realtime_demo``——命名源于早期实时演示，实际上它是生产巡检
+引擎：由 ``inspection_worker`` 注入 ``InspectionService``，并由 systemd 单元
+``inspection-worker.service`` 拉起。更名以消除「演示代码混入生产路径」的误导。
+
+职责：按配置装配多路相机读取器与推理运行时，循环采集 → 推理 → 标注 →
+落盘 → 感知进程直接持久化，并输出 summary.json。
+``main()`` 的 CLI 入口与非 headless 的 OpenCV 窗口仅用于本机调试。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,11 +27,12 @@ from app.robot_core.contracts import InferenceRequest
 from app.robot_core.inference import InferenceRuntime, build_configured_adapters, annotate_detections
 from app.robot_core.inspection import InspectionOutput
 from app.robot_core.sensing import MultiCameraManager, build_camera_reader
-from app.ipc import JsonSocketClient
+from app.robot_core.storage import PlatformStore
+from app.robot_core.inspection.preview import PreviewFrames
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="realtime-inspection")
+    parser = argparse.ArgumentParser(prog="inspection-engine")
     parser.add_argument("--config")
     parser.add_argument("--mode", choices=("single", "four", "eight", "custom"))
     parser.add_argument("--camera-ids", nargs="+", metavar="CAMERA_ID",
@@ -83,7 +95,7 @@ def _check(config: PlatformConfig, mode: str) -> None:
     finally:
         runtime.stop()
     print(json.dumps({
-        "service": "realtime-inspection", "status": "ok", "mode": mode,
+        "service": "inspection-engine", "status": "ok", "mode": mode,
         "cameras": list(cameras), "models": list(runtime.adapters),
         "modelHealth": model_health,
     }, ensure_ascii=False))
@@ -101,20 +113,26 @@ def run(
     status_callback: Any = None,
     frame_callback: Any = None,
     camera_ids: Sequence[str] | None = None,
+    store: PlatformStore | None = None,
+    camera_pool: Any = None,
+    inference_runtime: InferenceRuntime | None = None,
+    preview: PreviewFrames | None = None,
 ) -> dict[str, Any]:
     if pipeline not in {"inference", "passthrough"}:
         raise ValueError("pipeline must be inference or passthrough")
     camera_values = _camera_config(config, mode, camera_ids)
-    readers = {camera_id: build_camera_reader(values) for camera_id, values in camera_values.items()}
+    readers = {camera_id: camera_pool.reader(values) if camera_pool is not None else build_camera_reader(values)
+               for camera_id, values in camera_values.items()}
     settings = config.values.get("inspection", {})
     queue_size = int(settings.get("queue_size", 2))
     batch_size = int(settings.get("batch_size", len(readers)))
     output_root = _rooted(config, str(settings.get("output_root", config.values["storage"]["media_root"])))
     output = InspectionOutput(output_root, task_run_id) if pipeline == "inference" else None
-    # Passthrough video does not persist inference assets and therefore must
-    # remain usable in environments without the robot-core socket.
-    core_client = JsonSocketClient(config.path("ipc", "robot_core")) if pipeline == "inference" else None
-    runtime = InferenceRuntime(build_configured_adapters(config)) if pipeline == "inference" else None
+    owns_store = store is None and pipeline == "inference"
+    if owns_store:
+        store = PlatformStore(config.database_url_for("perception"), pool_options=config.database_pool_options)
+    owns_runtime = inference_runtime is None and pipeline == "inference"
+    runtime = (inference_runtime or InferenceRuntime(build_configured_adapters(config))) if pipeline == "inference" else None
     configured_fps = settings.get("capture_fps")
     if configured_fps is None:
         configured_fps = 3.0 if mode == "single" else 2.0
@@ -138,7 +156,7 @@ def run(
     error_message: str | None = None
     last_camera_errors: dict[str, str] = {}
     try:
-        if runtime is not None:
+        if runtime is not None and owns_runtime:
             runtime.start()
         manager.start()
         state = "running"
@@ -184,14 +202,18 @@ def run(
                                    "trace_id": response.trace_id})
                     annotated = annotate_detections(packet.image, result)
                 if frame_callback:
-                    frame_callback({
+                    frame = {
                         "camera_id": packet.camera_id,
                         "frame_id": packet.frame_id,
                         "captured_at": packet.captured_at,
                         "captured_at_iso": datetime.fromtimestamp(packet.captured_at, timezone.utc).isoformat(),
                         "pipeline": pipeline,
-                        "jpeg_base64": _encode_jpeg_base64(annotated),
-                    })
+                    }
+                    if preview is None:
+                        frame["jpeg_base64"] = _encode_jpeg_base64(annotated)
+                    else:
+                        frame["jpeg_path"] = preview.save(task_run_id, packet.camera_id, packet.frame_id, annotated)
+                    frame_callback(frame)
                 if output is not None:
                     paths = output.write(packet, result, annotated, persist_all=True)
                     if paths:
@@ -206,11 +228,10 @@ def run(
                             "started_at": datetime.fromtimestamp(packet.captured_at, timezone.utc).isoformat(),
                             "finished_at": datetime.now(timezone.utc).isoformat(),
                         }
-                        import asyncio
-                        assert core_client is not None
-                        asyncio.run(core_client.call({"operation": "inspection.persist", "original_asset": original_asset,
-                            "result_asset": result_asset, "inference": inference, "detections": result.get("detections", [])}))
-                positive += int(bool(result["detections"]))
+                        assert store is not None
+                        store.persist_inference_result(original_asset=original_asset, result_asset=result_asset,
+                            inference=inference, detections=result.get("detections", []))
+                positive += int(bool(result.get("detections")))
                 processed += 1
                 if status_callback:
                     current_errors = dict(manager.errors)
@@ -235,8 +256,10 @@ def run(
             close = getattr(reader, "close", None)
             if close:
                 close()
-        if runtime is not None:
+        if runtime is not None and owns_runtime:
             runtime.stop()
+        if owns_store and store is not None:
+            store.close()
         try:
             import cv2
             if not headless:

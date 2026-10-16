@@ -2,8 +2,8 @@
 
 - 后端自有业务库：database_url（PostgreSQL，由 ROBOT_DATABASE_URL 提供）；
 - 写入权属：本后端只写自有表（ui_* 工作台数据与用户表）；
-  设备、控制、媒体、推理相关表由 robot-core 进程独占写入（后端只读检测结果）；
-- 表结构由 init_db() 在应用启动时 create_all；生产迁移工具建议引入 alembic。
+  控制表由 robot-core 写入，媒体、巡检与推理表由感知进程写入；
+- 表结构统一由 app.migrations 管理，生产关闭自动迁移后只检查版本。
 """
 
 from __future__ import annotations
@@ -51,10 +51,13 @@ def reset_engine() -> None:
 
 
 def init_db() -> None:
-    """按模型创建缺失的表（幂等）。"""
-    from app.db import models  # noqa: F401  确保模型已注册到 Base.metadata
+    """Apply the same versioned migrations as the robot runtime."""
+    from app.migrations import check_database, upgrade_database
 
-    Base.metadata.create_all(get_engine())
+    if get_settings().auto_migrate:
+        upgrade_database(get_engine())
+    else:
+        check_database(get_engine())
 
 
 def get_db() -> Iterator[Session]:

@@ -67,6 +67,16 @@ class PlatformConfig:
     def database_url(self) -> str:
         return str(self.values["storage"].get("database_url") or self.values["storage"]["database"])
 
+    def database_url_for(self, role: str) -> str:
+        if role not in {"core", "perception", "sync", "migration"}:
+            raise ValueError(f"unknown database role: {role}")
+        return os.environ.get(f"ROBOT_{role.upper()}_DATABASE_URL") or self.database_url
+
+    @property
+    def sync_enabled(self) -> bool:
+        override = os.environ.get("ROBOT_SYNC_ENABLED")
+        return override.lower() in {"true", "1", "yes"} if override is not None else bool(self.values["sync"]["enabled"])
+
     @property
     def database_display_url(self) -> str:
         return redact_database_url(self.database_url)

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import base64
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
-from urllib.request import HTTPDigestAuthHandler, HTTPPasswordMgrWithDefaultRealm, Request, build_opener, urlopen
+from urllib.parse import quote, urlencode
+from urllib.request import Request
 
+from app.robot_core.common.camera_http import (
+    basic_auth_header,
+    build_camera_opener,
+    redact_secrets,
+)
 from app.robot_core.contracts import CaptureRequest
 
 from .camera import CameraCaptureError
@@ -64,14 +68,11 @@ class HttpJpegCameraProvider:
 
     def __init__(self, settings: NetworkCameraSettings | None = None, *, opener: Any = None):
         self.settings = settings or NetworkCameraSettings()
-        if opener is not None:
-            self._opener = opener
-        elif self.settings.auth_scheme == "digest" and self.settings.username:
-            manager = HTTPPasswordMgrWithDefaultRealm()
-            manager.add_password(None, self._origin(), self.settings.username, self.settings.password or "")
-            self._opener = build_opener(HTTPDigestAuthHandler(manager)).open
-        else:
-            self._opener = urlopen
+        # 认证构造与 PTZ 控制驱动共用（app.robot_core.common.camera_http）。
+        self._opener = build_camera_opener(
+            self._origin(), self.settings.username, self.settings.password,
+            self.settings.auth_scheme, opener,
+        )
 
     def _origin(self) -> str:
         return f"http://{self.settings.host}:{self.settings.port}"
@@ -88,16 +89,15 @@ class HttpJpegCameraProvider:
         })
         url = f"http://{settings.host}:{settings.port}{settings.path}?{query}"
         headers = {"Accept": "image/jpeg"}
-        if settings.auth_scheme == "basic" and settings.username is not None:
-            credentials = f"{settings.username}:{settings.password or ''}".encode()
-            headers["Authorization"] = "Basic " + base64.b64encode(credentials).decode("ascii")
+        authorization = basic_auth_header(settings.username, settings.password, settings.auth_scheme)
+        if authorization is not None:
+            headers["Authorization"] = authorization
         try:
             response = self._opener(Request(url, headers=headers), timeout=settings.timeout_seconds)
             with response:
                 content = response.read()
         except (HTTPError, URLError, OSError, TimeoutError) as error:
-            details = str(error).replace(url, self._safe_url(url))
-            details = __import__("re").sub(r"(?i)(password|passwd|pwd)=([^&\s]+)", r"\1=***", details)
+            details = redact_secrets(str(error), url=url)
             raise CameraCaptureError(f"network camera request failed: {details}") from error
         if not content or not content.startswith(b"\xff\xd8") or not content.endswith(b"\xff\xd9"):
             raise CameraCaptureError("network camera returned invalid JPEG data")
@@ -120,19 +120,6 @@ class HttpJpegCameraProvider:
             "jpeg_quality": request.parameters.get("jpeg_quality", self.settings.jpeg_quality),
         }
         return NetworkCameraSettings.from_mapping(values)
-
-    @staticmethod
-    def _safe_url(value: str) -> str:
-        try:
-            parts = urlsplit(value)
-            if parts.username is not None or parts.password is not None:
-                host = parts.hostname or "unknown-host"
-                if parts.port:
-                    host = f"{host}:{parts.port}"
-                return urlunsplit((parts.scheme, host, parts.path, parts.query, ""))
-        except ValueError:
-            pass
-        return value
 
 
 class RtspCameraProvider:

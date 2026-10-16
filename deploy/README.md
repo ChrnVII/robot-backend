@@ -55,8 +55,10 @@ curl -s http://127.0.0.1:8100/healthz
 - 模型权重不在 git（`*.pt` 已忽略）：git 方式部署需单独拷贝
   `models/hs_detect/weights/best.pt`（整体复制/rsync 会自动带上）。
 
-五个进程：`robot-core`（设备唯一写入者）→ `sensor-worker` / `inference-worker` /
-`inspection-worker` / `sync-agent`，另有 `backend.service`（FastAPI，端口 8100）。
+默认三个进程：`robot-core`（控制）+ `inspection-worker`（采集、模型、巡检）+
+`backend.service`（FastAPI，端口 8100）。感知进程同时提供原采集与巡检 socket，模型首次推理加载、任务间复用。
+原 `sensor-worker` / `inference-worker` 入口供独立调试，不能与感知进程同时运行。
+`sync-agent` 按 `ROBOT_SYNC_ENABLED`（未设置时读 YAML `sync.enabled`）单独启用。
 `robot-core` 必须先于其他进程就绪；模型或同步不可用不得阻止停车与人工接管。
 
 ## 手动快速启动（不配 systemd，调试/验证用）
@@ -77,21 +79,60 @@ deploy/quick_start_up.sh stop      # 全部停止（与启动相反的顺序）
 # 日志: logs/<组件>.log；pid: run/<组件>.pid
 ```
 
-脚本内部顺序与手工等价：先 robot-core（等待 socket 就绪），再三个 worker 与
-sync-agent，最后 uvicorn 后端。手工单进程启动形如
+脚本内部顺序：检查迁移版本（开发自动迁移），先 robot-core（等待 socket 就绪），
+再感知进程、可选 sync-agent，最后 uvicorn。升级前停止旧进程；脚本会停止旧 pid 文件记录的独立 worker，
+systemd 安装会禁用旧独立 worker。重复绑定活跃 socket 会报错，无法替换正在工作的实例。
+手工单进程启动形如
 `nohup .venv/bin/python -m app.robot_core.processes.robot_core --config configs/hardware.yaml &`。
 
 ## 联调与开发（无硬件）
 
 ```bash
 uv sync                       # 全量依赖（含 torch/opencv/串口；默认组已配置）
-uv run fastapi dev            # http://127.0.0.1:8000（需先启动 robot_core 五进程）
+uv run fastapi dev            # http://127.0.0.1:8000（需先启动控制与感知进程）
 uv run pytest                 # 全量测试（robot_core + 后端；需要 PostgreSQL 测试库）
 ```
 
 `configs/dev.yaml` 连接本机 PostgreSQL（密码经 `ROBOT_DB_PASSWORD` 注入），
-可完整跑通五个进程
+可运行控制、感知与后端三个进程
 （`uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml --check`）。
+
+## 数据库迁移与权限
+
+版本由 `app/migrations` 统一管理，支持空库与旧 v1–v7 数据库升级，原业务数据保留。
+先备份生产库，再使用数据库所有者账号执行迁移；服务进程使用独立、非所有者、非超级用户账号。
+`robot.env.example` 默认关闭生产自动迁移，首次启动前必须执行：
+
+```bash
+set -a; . ./robot.env; set +a
+# ROBOT_MIGRATION_DATABASE_URL 指向所有者账号；未配置时沿用 YAML storage.database_url。
+.venv/bin/python -m app.robot_core.storage.migrate --config configs/hardware.yaml upgrade
+.venv/bin/python -m app.robot_core.storage.migrate --config configs/hardware.yaml check
+```
+
+生产设置 `ROBOT_AUTO_MIGRATE=false`，API 和感知进程仅校验版本；控制进程允许数据库离线启动，
+急停先执行、审计后补。`check` / 进程 `--check` 只读检查数据库，不升级结构。
+后续升级仍由所有者执行 `upgrade`；迁移带事务锁，重复执行安全，降级需从备份恢复。
+
+分别创建新的 LOGIN 角色（密码由部署管理），再由所有者授予各进程所需表与结果视图权限：
+
+```bash
+.venv/bin/python -m app.migrations.permissions \
+  --backend-role robot_api --core-role robot_control \
+  --perception-role robot_perception --sync-role robot_sync
+```
+
+授权命令优先使用 `ROBOT_MIGRATION_DATABASE_URL`。它只授予权限，不会撤销角色已有权限；
+请使用新角色，勿让服务账号继承所有者权限。后端设置 `ROBOT_DATABASE_URL`；运行时分别设置
+`ROBOT_CORE_DATABASE_URL`、`ROBOT_PERCEPTION_DATABASE_URL`、`ROBOT_SYNC_DATABASE_URL`。
+这几个地址应指向同一数据库，使用不同角色；未设置运行时地址时继续使用 YAML 原地址。
+
+控制进程仅写控制与状态表；感知进程写媒体、推理、巡检表；后端仅写工作台与鉴权表、读结果视图。
+事件与 outbox 随业务变更在同一事务提交。感知进程重启后，中断任务使用原 `failed` 状态返回，保留进度，
+需要重新创建任务。SIGTERM 会关闭 socket、停止任务并释放相机与模型。
+
+预览每相机最多保留 16 帧，启动时清理旧预览；历史任务证据继续保留，保持原图片接口可用，
+需按业务保留期单独归档并监控磁盘容量。急停审计位于 `data/emergency-audit`，成功重放后删除。
 
 ## 鉴权
 

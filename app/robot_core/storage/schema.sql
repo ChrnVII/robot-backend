@@ -1,3 +1,4 @@
+-- Legacy v7 reference only. Use app.robot_core.storage.migrate upgrade for the current schema.
 CREATE TABLE IF NOT EXISTS schema_revisions (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -435,3 +436,24 @@ CREATE TABLE IF NOT EXISTS inspection_symptoms (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_inspection_symptoms_record ON inspection_symptoms(record_id);
+
+-- =====================================================================
+-- 跨端只读视图：收敛后端对 robot_core 独占表的读取契约
+-- =====================================================================
+-- 后端 services/inspection.py 的检测分页此前在源码里硬编码 inference_runs /
+-- media_assets 的表结构与「结果图关联规则」（文件名后缀 + captured_at 匹配），
+-- 属于共享数据库集成的隐性耦合。该视图由 robot_core（表的 owner）定义，
+-- 视图本身即跨端读契约：表结构演进时只改这里，后端无需同步修改。
+-- 注：后缀匹配用 strpos 而非 LIKE，避免 DDL 语句中 % 与参数占位符转义的歧义。
+CREATE OR REPLACE VIEW v_inference_run_results AS
+SELECT ir.run_id, ir.request_id, ir.task_run_id, ir.trace_id, ir.capability,
+       ir.model_version, ir.model_sha256, ir.status, ir.result,
+       ir.started_at, ir.finished_at, ma.asset_id, ma.uri, ma.mime_type,
+       ma.sha256, ma.size_bytes, ma.captured_at,
+       ma2.asset_id AS result_asset_id, ma2.uri AS result_uri,
+       ma2.mime_type AS result_mime_type
+FROM inference_runs ir
+JOIN media_assets ma ON ma.asset_id = ir.asset_id
+LEFT JOIN media_assets ma2 ON ma2.task_run_id = ir.task_run_id
+  AND ma2.device_id = ma.device_id AND ma2.media_type = 'image'
+  AND strpos(ma2.uri, '_result.jpg') > 0 AND ma2.captured_at = ma.captured_at;

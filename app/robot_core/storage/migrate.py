@@ -5,9 +5,9 @@ import json
 import sys
 from pathlib import Path
 
-# Allow `python runtime/src/.../migrate.py` from a source checkout without
+# Allow direct script execution from a source checkout without
 # requiring the caller to install the package or set PYTHONPATH manually.
-SRC_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = Path(__file__).resolve().parents[3]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -25,7 +25,14 @@ def main() -> None:
     parser.add_argument("command", choices=("upgrade", "check"))
     args = parser.parse_args()
     config = load_config(args.config)
-    store = PlatformStore(config.database_url, pool_options=config.database_pool_options)
+    from app.migrations import check_database, upgrade_database
+
+    database_url = config.database_url_for("migration")
+    if args.command == "upgrade":
+        upgrade_database(database_url)
+    else:
+        check_database(database_url)
+    store = PlatformStore(database_url, pool_options=config.database_pool_options, initialize=False)
     try:
         expected = {
             "schema_revisions", "robots", "control_leases", "config_revisions",

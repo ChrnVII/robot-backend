@@ -1,8 +1,11 @@
-"""测试夹具：全部用例运行在 PostgreSQL 测试库上（SQLite 支持已移除）。
+"""测试夹具：默认全部用例运行在 PostgreSQL 测试库上（SQLite 支持已移除）。
 
 数据库地址来自环境变量 ``ROBOT_TEST_DATABASE_URL``；未设置时使用本地默认
 ``postgresql+psycopg://robot:robot@127.0.0.1:5432/robot_platform_test``。
-每个用例开始前重建 public schema 保证完全隔离；PostgreSQL 不可用时整组跳过。
+每个用例开始前重建 public schema 保证完全隔离；PostgreSQL 不可用时跳过。
+
+例外：标记 ``@pytest.mark.no_database`` 的纯单元用例（契约核 / WS 中枢 /
+IPC 帧协议等不触库的用例）无需数据库，在任意机器上都会执行。
 """
 
 from __future__ import annotations
@@ -37,7 +40,9 @@ _CACHED_PROVIDERS = (
 
 def _raw_dsn(url: str) -> str:
     """psycopg（非 SQLAlchemy）不识别 ``+psycopg`` 后缀。"""
-    return url.replace("postgresql+psycopg://", "postgresql://", 1)
+    from app.common.dburl import psycopg_dsn
+
+    return psycopg_dsn(url)
 
 
 def _reset_schema() -> None:
@@ -56,12 +61,15 @@ def _reset_schema() -> None:
 
 def _reset_all() -> None:
     from app.api import deps
+    from app.api.ws.hub import reset_push_hub
     from app.common.config import get_settings
     from app.db.database import reset_engine
 
     for name in _CACHED_PROVIDERS:
         getattr(deps, name).cache_clear()
     get_settings.cache_clear()
+    # WS 推送中枢持有上一用例事件循环上的主题与订阅，必须重建。
+    reset_push_hub()
     reset_engine()
 
 
@@ -73,14 +81,14 @@ def _dispose_all() -> None:
     _reset_all()
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def _postgres_available():
     try:
         import psycopg
 
         with psycopg.connect(_raw_dsn(TEST_DSN), connect_timeout=5):
             pass
-    except Exception as error:  # noqa: BLE001 - 明确提示后整组跳过
+    except Exception as error:  # noqa: BLE001 - 明确提示后跳过依赖数据库的用例
         pytest.skip(
             f"PostgreSQL 测试库不可用（{TEST_DSN}）：{error}。"
             "请设置 ROBOT_TEST_DATABASE_URL 指向可用的 PostgreSQL 测试库后重跑。"
@@ -88,13 +96,18 @@ def _postgres_available():
 
 
 @pytest.fixture(autouse=True)
-def _clean_database(_postgres_available):
+def _clean_database(request):
+    """默认每个用例重建 schema；``no_database`` 标记的纯单元用例直接跳过。"""
+    if request.node.get_closest_marker("no_database") is not None:
+        yield
+        return
+    request.getfixturevalue("_postgres_available")
     _reset_schema()
     yield
 
 
 # ---------------------------------------------------------------------------
-# 测试替身：后端接口测试不依赖真实机器人五进程（UDS），因此在测试侧用进程内
+# 测试替身：后端接口测试不依赖真实机器人进程（UDS），因此在测试侧用进程内
 # 替身替换网关实现。替身仅存在于测试代码中；应用代码已不包含任何 mock 实现。
 # ---------------------------------------------------------------------------
 
@@ -258,6 +271,13 @@ class FakeInspectionWorkerGateway:
             return self._stop(str(request.get("task_run_id")))
         if operation == "status":
             return self._status(str(request.get("task_run_id") or ""))
+        if operation == "snapshot":
+            task_run_id = str(request["task_run_id"])
+            value = {"status": self._status(task_run_id), "frame": {"available": False, "task_run_id": task_run_id}}
+            if request.get("include_detections", True):
+                value.update(detections={"items": [], "offset": 0, "limit": 20, "total": 0},
+                             frames={"task_run_id": task_run_id, "frames": {}})
+            return value
         if operation == "detections":
             return {
                 "items": [],
@@ -316,6 +336,12 @@ def _install_fake_gateways(monkeypatch) -> None:
 def _make_client(monkeypatch, **env: str) -> TestClient:
     monkeypatch.setenv("ROBOT_DATABASE_URL", TEST_DSN)
     monkeypatch.setenv("ROBOT_AUTH_ENABLED", "false")
+    monkeypatch.setenv("ROBOT_WS_EVENT_LISTENER_ENABLED", "false")
+    monkeypatch.setenv("ROBOT_DEFAULT_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ROBOT_DEFAULT_ADMIN_PASSWORD", "admin123")
+    monkeypatch.setenv("ROBOT_AUTO_MIGRATE", "true")
+    monkeypatch.setenv("ROBOT_ROBOT_ID", "robot-dev-001")
+    monkeypatch.setenv("ROBOT_MODE", "simulated")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     _install_fake_gateways(monkeypatch)

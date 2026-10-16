@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.common.config import Settings
+from app.contracts import Op
 from app.gateways.base import RobotCoreError, camelize
 from app.gateways.robot_core import RobotCoreGateway
 
@@ -25,7 +26,7 @@ class RobotService:
         return self._settings.mode
 
     async def robot_state(self) -> dict:
-        return camelize(await self._gateway.call({"operation": "health"}))
+        return camelize(await self._gateway.call({"operation": Op.HEALTH}))
 
     async def device_state(self, device_id: str) -> dict:
         if not _DEVICE_ID.fullmatch(device_id):
