@@ -30,10 +30,10 @@ class Settings(BaseSettings):
     inspection_worker_socket: str = "run/inspection-worker.sock"
     inspection_worker_timeout: float = 10.0
 
-    # 后端自有业务库（用户 / 任务 / 告警 / 报告 / 工作台数据；PostgreSQL DSN）
+    # 后端业务库（用户 / 任务 / 告警 / 报告 / 工作台数据，以及只读的检测结果；
+    # PostgreSQL DSN）。生产与 robot-core 共用同一个 robot_platform 库，
+    # 检测查询因此复用该 DSN 对应的共享 engine，不再单独配置第二个地址。
     database_url: str = ""
-    # 机器人业务库（只读检测结果等；生产与 robot-core 共用 PostgreSQL robot_platform）
-    robot_database_url: str = ""
 
     # 鉴权（目标 API；默认关闭以保持旧前端联调契约，生产开启）
     auth_enabled: bool = False

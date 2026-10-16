@@ -64,7 +64,9 @@ def get_inspection_service() -> InspectionService:
 
 @lru_cache(maxsize=1)
 def get_inference_query_service() -> InferenceQueryService:
-    return InferenceQueryService(get_settings().robot_database_url)
+    # 复用后端共享 engine（检测记录与后端自有表同处 robot_platform 库），
+    # 避免为只读查询再开一个连接池。
+    return InferenceQueryService()
 
 
 def get_workbench_service(session: Session = Depends(get_db)) -> WorkbenchService:

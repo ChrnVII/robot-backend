@@ -84,8 +84,10 @@ CREATE TABLE IF NOT EXISTS device_state_history (
     received_at TEXT NOT NULL,
     source TEXT NOT NULL
 );
+-- 覆盖 device_state_history 的「按设备取最近 N 条」查询：
+-- ORDER BY sampled_at DESC, received_at DESC 全程走索引，无需额外排序。
 CREATE INDEX IF NOT EXISTS idx_device_state_history_device_time
-    ON device_state_history(device_id, sampled_at);
+    ON device_state_history(device_id, sampled_at DESC, received_at DESC);
 CREATE TABLE IF NOT EXISTS missions (
     mission_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -205,8 +207,7 @@ CREATE TABLE IF NOT EXISTS inference_detections (
     y0 REAL NOT NULL,
     x1 REAL NOT NULL,
     y1 REAL NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(request_id, detection_id)
+    created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_inference_detections_task ON inference_detections(task_run_id, frame_id);
 CREATE TABLE IF NOT EXISTS alerts (
@@ -222,6 +223,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     acknowledged_at TEXT,
     closed_reason TEXT
 );
+-- 告警列表按 state/created_at 分页、按 trace_id 回查；原表此前没有任何索引。
+CREATE INDEX IF NOT EXISTS idx_alerts_state_time ON alerts(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_trace ON alerts(trace_id);
 CREATE TABLE IF NOT EXISTS reviews (
     review_id TEXT PRIMARY KEY,
     alert_id TEXT NOT NULL,
@@ -231,6 +235,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     reviewed_at TEXT NOT NULL,
     FOREIGN KEY(alert_id) REFERENCES alerts(alert_id)
 );
+CREATE INDEX IF NOT EXISTS idx_reviews_alert ON reviews(alert_id);
 CREATE TABLE IF NOT EXISTS telemetry_segments (
     segment_id TEXT PRIMARY KEY,
     robot_id TEXT NOT NULL,

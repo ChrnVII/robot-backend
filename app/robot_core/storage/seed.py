@@ -8,7 +8,7 @@ from app.robot_core.common import utc_now
 from app.robot_core.common.config import redact_database_url
 from app.robot_core.contracts import DeviceState, HealthState
 
-from .database import PlatformStore
+from .database import SCHEMA_VERSION, PlatformStore
 
 # 场地规范：两个临近鸡舍，均为 8 排、6 层。
 # 鸡舍 1 每排 132 列，鸡舍 2 每排 160 列。
@@ -205,7 +205,7 @@ def main() -> None:
             clear_seeded_tables(store)
         seed_prototype(store)
         print(json.dumps(
-            {"status": "ok", "database": redact_database_url(store.database_url), "revision": 5},
+            {"status": "ok", "database": redact_database_url(store.database_url), "revision": SCHEMA_VERSION},
             ensure_ascii=False,
         ))
     finally:

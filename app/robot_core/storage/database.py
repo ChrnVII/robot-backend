@@ -11,6 +11,10 @@ from app.robot_core.common import new_id, parse_utc, utc_now
 from app.robot_core.contracts import CommandResult, ControlLease, DeviceCommand, DeviceState, Event
 from .db import PostgresConnectionPool, is_integrity_error, is_postgres_target
 
+# 目标 schema 版本。schema.sql 描述「完整目标结构」，_upgrade_existing_tables
+# 负责为已存在的老库补齐增量；两者都是幂等 DDL，因此只在版本落后时执行一次。
+SCHEMA_VERSION = 6
+
 
 class PlatformStore:
     """Robot business store backed by PostgreSQL."""
@@ -47,17 +51,31 @@ class PlatformStore:
         return self._postgres_pool.connection()
 
     def initialize(self) -> None:
-        schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._lock, self.connect() as connection:
             # Serialize first-time initialization across robot-core and
             # sync-agent processes on the same PostgreSQL instance.
             connection.execute("SELECT pg_advisory_xact_lock(hashtext('app.robot_core_schema_v1'))")
+            if self._applied_revision(connection) >= SCHEMA_VERSION:
+                # 结构已是最新：跳过整份 DDL（原实现对每次进程启动都重跑一遍 schema）。
+                return
+            schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
             connection.executescript(schema)
             self._upgrade_existing_tables(connection)
             connection.execute(
-                "INSERT INTO schema_revisions(version, applied_at) VALUES (5, ?) ON CONFLICT DO NOTHING",
-                (utc_now(),),
+                "INSERT INTO schema_revisions(version, applied_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                (SCHEMA_VERSION, utc_now()),
             )
+
+    @staticmethod
+    def _applied_revision(connection) -> int:
+        """返回已应用的 schema 版本；全新库或早于版本表的老库返回 0。"""
+        exists = connection.execute("SELECT to_regclass('schema_revisions') AS name").fetchone()
+        if exists is None or exists["name"] is None:
+            return 0
+        row = connection.execute("SELECT max(version) AS version FROM schema_revisions").fetchone()
+        if row is None or row["version"] is None:
+            return 0
+        return int(row["version"])
 
     @staticmethod
     def _upgrade_existing_tables(connection) -> None:
@@ -99,6 +117,24 @@ class PlatformStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency "
             "ON inbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
+        # ---- v6：索引整备（老库补齐；全新库由 schema.sql 直接建好）----
+        # detection_id 本身已是主键，组合唯一约束 (request_id, detection_id) 完全冗余；
+        # 而 inference_detections 是写入量最大的表，每次插入都白付一次索引维护成本。
+        connection.execute(
+            "ALTER TABLE inference_detections "
+            "DROP CONSTRAINT IF EXISTS inference_detections_request_id_detection_id_key"
+        )
+        # 历史采样按 sampled_at DESC, received_at DESC 取最近 N 条；旧索引只有
+        # (device_id, sampled_at)，补成降序三列以消除排序。
+        connection.execute("DROP INDEX IF EXISTS idx_device_state_history_device_time")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_state_history_device_time "
+            "ON device_state_history(device_id, sampled_at DESC, received_at DESC)"
+        )
+        # alerts 与 reviews 此前完全没有索引，按状态分页 / 按告警回查会全表扫描。
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_alerts_state_time ON alerts(state, created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_alerts_trace ON alerts(trace_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_reviews_alert ON reviews(alert_id)")
 
     @staticmethod
     def _json(value: Mapping[str, Any]) -> str:

@@ -6,11 +6,18 @@
 
 import os
 
+from sqlalchemy import create_engine
+
 from app.robot_core.storage import PlatformStore
 from app.services.inspection import InferenceQueryService
 
 TEST_DSN = os.environ["ROBOT_TEST_DATABASE_URL"]
 _NOW = "2026-10-15T06:00:00.000000+00:00"
+
+
+def _service() -> InferenceQueryService:
+    """显式注入指向测试库的 engine（生产默认复用后端共享 engine）。"""
+    return InferenceQueryService(create_engine(TEST_DSN, pool_pre_ping=True))
 
 
 def test_results_reads_persisted_entries():
@@ -39,7 +46,7 @@ def test_results_reads_persisted_entries():
     finally:
         store.close()
 
-    service = InferenceQueryService(TEST_DSN)
+    service = _service()
     try:
         page = service.results("run-1", 0, 50)
         assert page["total"] == 1
@@ -61,7 +68,7 @@ def test_results_reads_persisted_entries():
 
 def test_results_degrade_to_empty_page_without_database():
     # 本用例开始前测试库已重建为空 schema（无表结构）：按契约降级为空页
-    service = InferenceQueryService(TEST_DSN)
+    service = _service()
     try:
         page = service.results("run-1", 0, 50)
         assert page["total"] == 0 and page["items"] == []

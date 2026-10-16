@@ -94,11 +94,11 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
 
 | 库 | 内容 | 写入方 |
 |---|---|---|
-| `ROBOT_DATABASE_URL` | 后端自有表：`ui_*` 工作台、`users`、`refresh_tokens` | 后端（crud 显式提交） |
-| `ROBOT_ROBOT_DATABASE_URL` | `inference_runs` / `media_assets` / `inference_detections` 等 | robot-core 独占写入；后端只读（检测分页） |
+| `ROBOT_DATABASE_URL` | 后端自有表：`ui_*` 工作台、`users`、`refresh_tokens`；只读 `inference_runs` / `media_assets` / `inference_detections` | 后端（crud 显式提交）、robot-core（检测记录） |
 
-两者均为 PostgreSQL（生产为 `robot_platform` 实例，见 robot.env.example）。表结构后端用
-`create_all` 启动建表；runtime 用 `schema.sql`（版本 5）。
+生产环境后端与 robot-core 共用同一个 `robot_platform` 实例，因此只配置这一个 DSN：
+检测分页（`InferenceQueryService`）复用后端共享 engine，不再单独开第二个连接池。
+后端用 `create_all` 启动建表；runtime 用 `schema.sql`（版本 6），版本一致时启动不再重跑 DDL。
 
 ## 模型与推理
 

@@ -42,12 +42,9 @@ async def lifespan(app: FastAPI):
         settings.robot_id, settings.mode, settings.auth_enabled,
     )
     yield
-    # 退出：释放数据库连接
-    from app.api import deps
+    # 退出：释放共享数据库连接池（检测查询服务复用同一 engine，无需单独释放）
     from app.db.database import reset_engine
 
-    if deps.get_inference_query_service.cache_info().currsize:
-        deps.get_inference_query_service().dispose()
     reset_engine()
 
 

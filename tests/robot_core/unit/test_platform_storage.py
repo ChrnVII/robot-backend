@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from app.robot_core.storage import MediaStore, PlatformStore
+from app.robot_core.storage.database import SCHEMA_VERSION
 from app.robot_core.sync import OutboxDispatcher
 from app.robot_core.common import utc_now
 
@@ -29,6 +30,38 @@ class PlatformStorageTest(unittest.TestCase):
             "inference_detections",
         }
         self.assertTrue(expected.issubset(self.store.table_names()))
+
+    def test_schema_revision_is_gated_and_repeated_init_keeps_data(self):
+        """版本已是最新时 initialize 走快路径：不重建表、不丢已有数据。"""
+        with self.store.connect() as connection:
+            connection.execute(
+                "INSERT INTO robots(robot_id, name, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("robot-1", "一号机", 1, utc_now(), utc_now()),
+            )
+            revision = connection.execute(
+                "SELECT max(version) AS version FROM schema_revisions"
+            ).fetchone()["version"]
+        self.assertEqual(int(revision), SCHEMA_VERSION)
+
+        second = PlatformStore(TEST_DSN)
+        self.addCleanup(second.close)
+        with second.connect() as connection:
+            remaining = connection.execute("SELECT count(*) AS count FROM robots").fetchone()["count"]
+        self.assertEqual(remaining, 1)
+
+    def test_index_layout_drops_redundant_unique_and_covers_alert_queries(self):
+        with self.store.connect() as connection:
+            indexes = {
+                row["indexname"] for row in connection.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
+                ).fetchall()
+            }
+        # detection_id 已是主键，(request_id, detection_id) 组合唯一纯属冗余写入开销
+        self.assertNotIn("inference_detections_request_id_detection_id_key", indexes)
+        # alerts / reviews 此前完全没有索引
+        self.assertIn("idx_alerts_state_time", indexes)
+        self.assertIn("idx_alerts_trace", indexes)
+        self.assertIn("idx_reviews_alert", indexes)
 
     def test_media_is_atomically_written_and_registered(self):
         media = MediaStore(self.root / "media", self.store, "robot-test")

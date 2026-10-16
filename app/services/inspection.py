@@ -2,7 +2,8 @@
 
 迁移来源：InspectionApplicationService.java、InferenceQueryService.java。
 - InspectionService：经 inspection-worker 网关（IPC）；
-- InferenceQueryService：只读 robot_platform 库的推理记录（数据库不可用时返回空页）。
+- InferenceQueryService：只读 robot_platform 库的推理记录（数据库不可用时返回空页）；
+  复用 app.db.database 的共享 engine，不再自建第二个连接池。
 """
 
 from __future__ import annotations
@@ -14,9 +15,10 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
-from app.common.dburl import require_postgres_url
+from app.db.database import get_engine
 from app.gateways.base import camelize
 from app.gateways.inspection_worker import InspectionWorkerGateway
 from app.schemas.inspection import StartInspectionRequest, StartVideoStreamRequest
@@ -117,20 +119,22 @@ _DETECTION_SQL = text(
 
 
 class InferenceQueryService:
-    """分页读取持久化的逐帧推理记录（迁移 InferenceQueryService.java）。"""
+    """分页读取持久化的逐帧推理记录（迁移 InferenceQueryService.java）。
 
-    def __init__(self, robot_database_url: str) -> None:
-        self._url = robot_database_url
-        self._engine = None
+    engine 注入策略：
+    - 不传（生产默认）：复用 app.db.database 的共享 engine，全后端只保留一个连接池；
+    - 显式传入：用于测试，或将来把检测记录拆到独立库时指向另一个 DSN，
+      此时由调用方负责 dispose()。
+    """
 
-    def _get_engine(self):
-        if self._engine is None:
-            url = require_postgres_url(self._url, "ROBOT_ROBOT_DATABASE_URL")
-            self._engine = create_engine(url, pool_pre_ping=True)
-        return self._engine
+    def __init__(self, engine: Engine | None = None) -> None:
+        self._engine = engine
+
+    def _get_engine(self) -> Engine:
+        return self._engine if self._engine is not None else get_engine()
 
     def dispose(self) -> None:
-        """释放数据库连接（测试与关闭时调用）。"""
+        """只释放显式注入的 engine；共享 engine 由 reset_engine() 统一释放。"""
         if self._engine is not None:
             self._engine.dispose()
             self._engine = None

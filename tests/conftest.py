@@ -315,7 +315,6 @@ def _install_fake_gateways(monkeypatch) -> None:
 
 def _make_client(monkeypatch, **env: str) -> TestClient:
     monkeypatch.setenv("ROBOT_DATABASE_URL", TEST_DSN)
-    monkeypatch.setenv("ROBOT_ROBOT_DATABASE_URL", TEST_DSN)
     monkeypatch.setenv("ROBOT_AUTH_ENABLED", "false")
     for key, value in env.items():
         monkeypatch.setenv(key, value)

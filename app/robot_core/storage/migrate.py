@@ -14,9 +14,9 @@ if str(SRC_ROOT) not in sys.path:
 from app.robot_core.common.config import load_config, redact_database_url
 
 try:
-    from .database import PlatformStore
+    from .database import SCHEMA_VERSION, PlatformStore
 except ImportError:  # direct script execution
-    from app.robot_core.storage.database import PlatformStore
+    from app.robot_core.storage.database import SCHEMA_VERSION, PlatformStore
 
 
 def main() -> None:
@@ -38,7 +38,7 @@ def main() -> None:
         missing = expected - store.table_names()
         if missing:
             raise RuntimeError(f"database schema incomplete: {sorted(missing)}")
-        print(json.dumps({"status": "ok", "command": args.command, "database": redact_database_url(store.database_url), "revision": 5}, ensure_ascii=False))
+        print(json.dumps({"status": "ok", "command": args.command, "database": redact_database_url(store.database_url), "revision": SCHEMA_VERSION}, ensure_ascii=False))
     finally:
         store.close()
 
