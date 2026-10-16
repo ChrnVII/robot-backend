@@ -22,6 +22,7 @@ from app.schemas.media import MediaCaptureRequest
 from app.schemas.system import PlatformResponse
 from app.services.media import MediaService
 from app.services.robot import RobotService
+from app.video import get_camera_stream_service
 
 root_router = APIRouter()
 router = APIRouter()
@@ -63,7 +64,10 @@ async def camera_stream(
     frame: str | None = Query(default=None),
     media: MediaService = Depends(get_media_service),
 ) -> FileResponse:
-    """返回一张真实 JPEG 快照（控制台预览轮询）；迁移 SystemController.cameraStream。"""
+    """返回一张真实 JPEG 快照（控制台预览轮询）；迁移 SystemController.cameraStream。
+
+    低延迟预览（/ws/camera/preview）不可用时，前端回退到这里；两条链路互不影响。
+    """
     task_run_id = f"preview-{_safe_token(frame, 'live')}"
     waypoint = "preview" if preset is None else f"preset-{preset}"
     asset = await media.capture(MediaCaptureRequest(
@@ -77,6 +81,12 @@ async def camera_stream(
     if not path.is_file():
         raise AppError("captured image is not available", code="INTERNAL_ERROR", status_code=500)
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/cam/stream/status", tags=["system"])
+def camera_stream_status(request: Request) -> dict:
+    """球形摄像头低延迟预览的诊断快照（是否启用、编码、分辨率、订阅者、丢帧）。"""
+    return ok(get_camera_stream_service().status(), trace_of(request))
 
 
 def _safe_token(value: str | None, fallback: str) -> str:

@@ -8,9 +8,7 @@ __pycache__/
 # 本地环境、运行数据与凭据
 .venv/
 .env
-# 注意：robot.env 含真实凭据。若历史上已被跟踪，需 git rm --cached robot.env
-# 并轮换其中所有密码（示例键名见 robot.env.example）。
-robot.env
+
 data/
 run/
 logs/

@@ -22,6 +22,7 @@ from app.common.logging import setup_logging
 from app.common.middleware import TraceIdMiddleware
 from app.contracts import Channels
 from app.db.database import get_session_factory, init_db
+from app.video import get_camera_stream_service, reset_camera_stream_service
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +86,17 @@ async def lifespan(app: FastAPI):
     finally:
         session.close()
     listener = _start_event_listener(settings)
+    # 球形摄像头低延迟预览：未配置 RTSP 地址时内部即降级为空操作。
+    get_camera_stream_service().start(asyncio.get_running_loop())
     logger.info(
-        "backend ready: robot=%s mode=%s auth=%s ws_events=%s",
+        "backend ready: robot=%s mode=%s auth=%s ws_events=%s camera_stream=%s",
         settings.robot_id, settings.mode, settings.auth_enabled, bool(listener),
+        get_camera_stream_service().started,
     )
     yield
-    # 退出：停事件监听 → 关推送订阅 → 释放网关 IPC 连接池 → 释放数据库引擎
+    # 退出：停事件监听 → 停摄像头拉流 → 关推送订阅 → 释放网关 IPC 连接池 → 释放数据库引擎
+    get_camera_stream_service().stop()
+    reset_camera_stream_service()
     if listener is not None:
         listener.stop()
     await get_push_hub().shutdown()

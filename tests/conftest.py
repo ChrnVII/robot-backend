@@ -64,12 +64,15 @@ def _reset_all() -> None:
     from app.api.ws.hub import reset_push_hub
     from app.common.config import get_settings
     from app.db.database import reset_engine
+    from app.video import reset_camera_stream_service
 
     for name in _CACHED_PROVIDERS:
         getattr(deps, name).cache_clear()
     get_settings.cache_clear()
     # WS 推送中枢持有上一用例事件循环上的主题与订阅，必须重建。
     reset_push_hub()
+    # 摄像头预览服务持有拉流线程与事件循环引用，同样必须重建。
+    reset_camera_stream_service()
     reset_engine()
 
 
@@ -342,6 +345,8 @@ def _make_client(monkeypatch, **env: str) -> TestClient:
     monkeypatch.setenv("ROBOT_AUTO_MIGRATE", "true")
     monkeypatch.setenv("ROBOT_ROBOT_ID", "robot-dev-001")
     monkeypatch.setenv("ROBOT_MODE", "simulated")
+    # 接口测试不连真实摄像头：显式清空 RTSP 地址，让预览服务降级为未启用。
+    monkeypatch.setenv("ROBOT_CAMERA_STREAM_URL", "")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     _install_fake_gateways(monkeypatch)

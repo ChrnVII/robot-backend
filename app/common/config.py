@@ -50,6 +50,26 @@ class Settings(BaseSettings):
     # 事件到达即刷新对应主题；关闭后仅保留 500ms 周期兜底推送。
     ws_event_listener_enabled: bool = True
 
+    # 球形摄像头低延迟预览：PyAV 解复用 → WebSocket 透传 Annex-B → 浏览器 WebCodecs。
+    # 地址留空（或显式关闭）时整条链路静默降级，前端回退到 /api/v1/cam/stream 的
+    # JPEG 轮询 —— 保证没配摄像头时页面依然可用。
+    # 建议使用**子码流**（海康为 .../Streaming/Channels/102），且编码为 H.264：
+    # WebCodecs 的 HEVC 支持依赖平台，H.265 子码流在 Chrome 上不保证能解。
+    camera_stream_enabled: bool = True
+    camera_stream_url: str = ""
+    camera_stream_transport: str = "tcp"  # tcp | udp
+    camera_stream_timeout_us: int = 5_000_000  # RTSP 超时（微秒）
+    camera_stream_client_queue: int = 8  # 每个浏览器订阅者的帧队列上限
+    camera_stream_reconnect_delay: float = 2.0
+
+    # 实时检测叠加（可选，只推给前端，不落库 —— 留档仍走 inference-worker）
+    camera_stream_detect_enabled: bool = False
+    camera_stream_model: str = ""  # YOLO 权重路径，如 models/best.pt
+    camera_stream_detect_every: int = 1
+    camera_stream_imgsz: int = 640
+    camera_stream_conf: float = 0.35
+    camera_stream_iou: float = 0.5
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
