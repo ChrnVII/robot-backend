@@ -1,0 +1,22 @@
+[Unit]
+Description=Inspection Robot Sync Agent（outbox 同步，默认禁用）
+After=robot-core.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=-__PROJECT_DIR__/robot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.robot_core.processes.sync_agent --config __PROJECT_DIR__/configs/hardware.yaml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=__PROJECT_DIR__/data __PROJECT_DIR__/run
+
+[Install]
+WantedBy=multi-user.target

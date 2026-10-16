@@ -1,6 +1,6 @@
 """数据库引擎 / Session / Base（SQLAlchemy，同步）。
 
-- 后端自有业务库：database_url（开发默认 SQLite，生产 PostgreSQL）；
+- 后端自有业务库：database_url（PostgreSQL，由 ROBOT_DATABASE_URL 提供）；
 - 写入权属：本后端只写自有表（ui_* 工作台数据与用户表）；
   设备、控制、媒体、推理相关表由 robot-core 进程独占写入（后端只读检测结果）；
 - 表结构由 init_db() 在应用启动时 create_all；生产迁移工具建议引入 alembic。
@@ -9,13 +9,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.common.config import get_settings
+from app.common.dburl import require_postgres_url
 
 
 class Base(DeclarativeBase):
@@ -26,22 +26,11 @@ _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
 
 
-def _ensure_sqlite_directory(url: str) -> None:
-    prefix = "sqlite:///"
-    if not url.startswith(prefix):
-        return
-    path = url[len(prefix):]
-    if path and path != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        url = get_settings().database_url
-        _ensure_sqlite_directory(url)
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        _engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+        url = require_postgres_url(get_settings().database_url, "ROBOT_DATABASE_URL")
+        _engine = create_engine(url, pool_pre_ping=True)
     return _engine
 
 

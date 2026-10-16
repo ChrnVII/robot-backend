@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 from typing import Any, Dict, List
 
 from app.robot_core.common import utc_now
+from app.robot_core.common.config import redact_database_url
 from app.robot_core.contracts import DeviceState, HealthState
 
 from .database import PlatformStore
@@ -176,20 +176,40 @@ def seed_prototype(store: PlatformStore, *, include_sample: bool = True) -> None
         write_sample_device_states(store)
 
 
+_SEEDED_TABLES = (
+    "farms", "coops", "agv_points", "cages",
+    "robots", "missions", "mission_runs", "inspection_records",
+    "device_states", "device_state_history",
+)
+
+
+def clear_seeded_tables(store: PlatformStore) -> None:
+    """清空种子数据表（--force 时使用）；TRUNCATE CASCADE 处理外键依赖。"""
+    with store.connect() as connection:
+        for table in _SEEDED_TABLES:
+            connection.execute(f"TRUNCATE TABLE {table} CASCADE")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="robot-seed", description="生成巡检域原型数据库")
-    parser.add_argument("--database", default=str(Path("data") / "robot-platform-prototype.db"))
-    parser.add_argument("--force", action="store_true", help="如目标文件已存在则先删除再重建")
+    parser = argparse.ArgumentParser(prog="robot-seed", description="生成巡检域原型数据（PostgreSQL）")
+    parser.add_argument(
+        "--database",
+        required=True,
+        help="目标 PostgreSQL DSN（如 postgresql+psycopg://robot:***@127.0.0.1:5432/robot_platform）",
+    )
+    parser.add_argument("--force", action="store_true", help="目标库已有种子数据时，先清空种子表再重建")
     args = parser.parse_args()
-    target = Path(args.database)
-    if target.exists() and target.stat().st_size > 0:
-        if not args.force:
-            raise SystemExit(f"target already exists: {target} (use --force to overwrite)")
-        target.unlink()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    store = PlatformStore(target)
-    seed_prototype(store)
-    print(json.dumps({"status": "ok", "database": str(target.resolve()), "revision": 5}, ensure_ascii=False))
+    store = PlatformStore(args.database)
+    try:
+        if args.force:
+            clear_seeded_tables(store)
+        seed_prototype(store)
+        print(json.dumps(
+            {"status": "ok", "database": redact_database_url(store.database_url), "revision": 5},
+            ensure_ascii=False,
+        ))
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

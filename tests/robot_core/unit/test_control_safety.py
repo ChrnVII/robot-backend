@@ -1,8 +1,7 @@
 import asyncio
-import tempfile
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from app.robot_core.contracts import DeviceCommand
 from app.robot_core.control import LeaseManager, SafetySupervisor
@@ -12,16 +11,15 @@ from app.robot_core.core import RobotCore
 from app.robot_core.devices import SimulatedDeviceDriver
 from app.robot_core.storage import PlatformStore
 
+TEST_DSN = os.environ["ROBOT_TEST_DATABASE_URL"]
+
 
 class ControlSafetyTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.store = PlatformStore(Path(self.temp.name) / "platform.db")
+        self.store = PlatformStore(TEST_DSN)
+        self.addCleanup(self.store.close)
         self.leases = LeaseManager(self.store, ttl_ms=3000)
         self.safety = SafetySupervisor(self.leases, max_motion_distance_m=2.0)
-
-    def tearDown(self):
-        self.temp.cleanup()
 
     def command(self, lease_id, **changes):
         now = datetime.now(timezone.utc)
@@ -65,8 +63,8 @@ class ControlSafetyTest(unittest.TestCase):
             result = await core.execute(self.command(lease.lease_id))
             self.assertEqual(result.state, "succeeded")
             with self.store.connect() as connection:
-                self.assertEqual(connection.execute("SELECT count(*) FROM commands").fetchone()[0], 1)
-                self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
+                self.assertEqual(connection.execute("SELECT count(*) AS count FROM commands").fetchone()["count"], 1)
+                self.assertEqual(connection.execute("SELECT count(*) AS count FROM events").fetchone()["count"], 1)
             await core.stop()
         asyncio.run(scenario())
 

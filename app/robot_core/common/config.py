@@ -106,8 +106,10 @@ def load_config(path: Optional[str] = None) -> PlatformConfig:
     database_url = storage.get("database_url") or storage.get("database")
     if not database_url:
         raise ConfigurationError("storage.database_url is required")
-    if storage.get("backend", "postgresql") == "postgresql" and not str(database_url).startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
-        raise ConfigurationError("PostgreSQL storage requires a PostgreSQL DSN")
+    if str(storage.get("backend", "postgresql")) != "postgresql":
+        raise ConfigurationError("storage.backend must be 'postgresql' (SQLite support removed)")
+    if not str(database_url).startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
+        raise ConfigurationError("storage requires a PostgreSQL DSN")
     pool = storage.get("pool", {})
     if not isinstance(pool, dict):
         raise ConfigurationError("storage.pool must be a mapping")

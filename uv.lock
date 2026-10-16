@@ -67,7 +67,10 @@ dependencies = [
     { name = "sqlalchemy" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
 hardware = [
     { name = "pyserial" },
     { name = "pyserial-asyncio" },
@@ -81,31 +84,31 @@ media = [
     { name = "sounddevice" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.141.1" },
     { name = "networkx", specifier = ">=3.2,<4" },
-    { name = "opencv-python-headless", marker = "extra == 'media'", specifier = ">=4.9,<5" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "psycopg-pool", specifier = ">=3.2,<4" },
     { name = "pyjwt", specifier = ">=2.8,<3" },
-    { name = "pyserial", marker = "extra == 'hardware'", specifier = ">=3.5,<4" },
-    { name = "pyserial-asyncio", marker = "extra == 'hardware'", specifier = ">=0.6,<1" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "sounddevice", marker = "extra == 'media'", specifier = ">=0.4,<1" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
-    { name = "torch", marker = "extra == 'inference'", specifier = ">=2.2,<3" },
-    { name = "ultralytics", marker = "extra == 'inference'", specifier = ">=8.3,<9" },
 ]
-provides-extras = ["hardware", "media", "inference"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8,<9" }]
+hardware = [
+    { name = "pyserial", specifier = ">=3.5,<4" },
+    { name = "pyserial-asyncio", specifier = ">=0.6,<1" },
+]
+inference = [
+    { name = "torch", specifier = ">=2.2,<3" },
+    { name = "ultralytics", specifier = ">=8.3,<9" },
+]
+media = [
+    { name = "opencv-python-headless", specifier = ">=4.9,<5" },
+    { name = "sounddevice", specifier = ">=0.4,<1" },
+]
 
 [[package]]
 name = "certifi"

@@ -10,9 +10,7 @@ __pycache__/
 .env
 data/
 run/
-
-# 数据库文件
-*.db
+logs/
 
 # 参考材料与模型权重（不进 git，部署时单独同步）
 old_project/

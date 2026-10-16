@@ -45,8 +45,8 @@ inspection:
   output_root: ../data/inspection
 storage:
   backend: postgresql
-  # Simulated development keeps a local fallback; hardware deployments must
-  # provide ROBOT_DB_PASSWORD through the environment or systemd credentials.
+  # Local PostgreSQL; deployments provide ROBOT_DB_PASSWORD through the
+  # environment or systemd credentials.
   database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
   database: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
   pool:

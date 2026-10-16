@@ -1,13 +1,12 @@
-"""Database connectivity shared by the robot runtime and compatibility services.
+"""PostgreSQL connectivity shared by the robot runtime.
 
-PostgreSQL is the production backend.  SQLite remains readable for one-off data
-migrations and legacy tests, but new deployments should provide a PostgreSQL DSN.
+The platform is PostgreSQL-only: DSNs come from ``configs/*.yaml``
+(``storage.database_url``) or the ``ROBOT_DATABASE_URL`` environment family.
 """
 
 from __future__ import annotations
 
 import re
-import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
@@ -32,14 +31,13 @@ def _postgres_dsn(target: DatabaseTarget) -> str:
 
 
 def _qmark_to_pyformat(sql: str) -> str:
-    """Translate the DB-API qmark style used by the existing stores."""
+    """Translate the DB-API qmark style used by the repositories."""
     # psycopg treats percent signs as formatting markers. Escape literal
     # percent signs first so SQL LIKE patterns remain valid after translation.
     sql = sql.replace("%", "%%")
     if "?" in sql:
         return _QMARK.sub("%s", sql)
-    # A few data-seeding helpers use SQLite's named ``:field`` parameters.
-    # psycopg uses ``%(field)s`` for the equivalent mapping parameters.
+    # Mapping helpers use ``:field`` parameters; psycopg expects ``%(field)s``.
     return _NAMED_PARAMETER.sub(r"%(\1)s", sql)
 
 
@@ -74,10 +72,16 @@ class PostgresConnection:
                 line for line in statement.splitlines()
                 if not line.strip().startswith("--")
             ).strip()
-            if cleaned and not cleaned.upper().startswith("PRAGMA "):
+            if cleaned:
                 statements.append(cleaned)
         for statement in statements:
             self.execute(statement)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
 
     def __enter__(self) -> "PostgresConnection":
         try:
@@ -148,31 +152,9 @@ class PostgresConnectionPool:
         self._pool.close()
 
 
-def connect_database(target: DatabaseTarget):
-    """Connect to PostgreSQL for DSNs, otherwise open a legacy SQLite file."""
-    if not is_postgres_target(target):
-        path = Path(target)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    try:
-        import psycopg
-        from psycopg.rows import dict_row
-    except ImportError as exc:  # pragma: no cover - exercised in deployment
-        raise RuntimeError(
-            "PostgreSQL backend requires psycopg; install project dependencies "
-            "or run `pip install 'psycopg[binary]'`."
-        ) from exc
-    return PostgresConnection(psycopg.connect(_postgres_dsn(target), row_factory=dict_row))
-
-
 def is_integrity_error(error: BaseException) -> bool:
-    if isinstance(error, sqlite3.IntegrityError):
-        return True
     try:
         import psycopg
-        return isinstance(error, psycopg.IntegrityError)
-    except ImportError:
+    except ImportError:  # pragma: no cover - psycopg is a required dependency
         return False
+    return isinstance(error, psycopg.IntegrityError)

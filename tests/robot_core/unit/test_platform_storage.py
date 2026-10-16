@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,12 +8,15 @@ from app.robot_core.storage import MediaStore, PlatformStore
 from app.robot_core.sync import OutboxDispatcher
 from app.robot_core.common import utc_now
 
+TEST_DSN = os.environ["ROBOT_TEST_DATABASE_URL"]
+
 
 class PlatformStorageTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.store = PlatformStore(self.root / "platform.db")
+        self.store = PlatformStore(TEST_DSN)
+        self.addCleanup(self.store.close)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -52,9 +56,9 @@ class PlatformStorageTest(unittest.TestCase):
         second = self.store.persist_inference_result(original_asset=base, result_asset=result, inference=inference, detections=inference["result"]["detections"])
         self.assertFalse(first["duplicate"]); self.assertTrue(second["duplicate"])
         with self.store.connect() as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM media_assets").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT count(*) FROM inference_runs").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT count(*) FROM inference_detections").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) AS count FROM media_assets").fetchone()["count"], 2)
+            self.assertEqual(connection.execute("SELECT count(*) AS count FROM inference_runs").fetchone()["count"], 1)
+            self.assertEqual(connection.execute("SELECT count(*) AS count FROM inference_detections").fetchone()["count"], 1)
 
     def test_outbox_enqueue_is_idempotent(self):
         first = self.store.enqueue_outbox("task", "run-1", "task.completed", {"ok": True}, "same-key")
@@ -113,11 +117,11 @@ class PlatformStorageTest(unittest.TestCase):
             device_id="audio", media_type="audio", extension=".wav", mime_type="audio/wav",
         )
         with self.store.connect() as connection:
-            count = connection.execute("SELECT count(*) FROM media_assets").fetchone()[0]
+            count = connection.execute("SELECT count(*) AS count FROM media_assets").fetchone()["count"]
         self.assertEqual(count, 0)
         self.store.register_asset(asset)
         with self.store.connect() as connection:
-            count = connection.execute("SELECT count(*) FROM media_assets").fetchone()[0]
+            count = connection.execute("SELECT count(*) AS count FROM media_assets").fetchone()["count"]
         self.assertEqual(count, 1)
 
     def test_unregistered_media_can_be_discarded(self):

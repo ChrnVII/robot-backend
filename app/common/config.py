@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ROBOT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ROBOT_", env_file="robot.env", extra="ignore")
 
     app_name: str = "inspection-robot-backend"
     version: str = "0.2.0"
@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     inspection_worker_socket: str = "run/inspection-worker.sock"
     inspection_worker_timeout: float = 10.0
 
-    # 后端自有业务库（用户 / 任务 / 告警 / 报告 / 工作台数据）
-    database_url: str = "sqlite:///data/robot-backend.db"
+    # 后端自有业务库（用户 / 任务 / 告警 / 报告 / 工作台数据；PostgreSQL DSN）
+    database_url: str = ""
     # 机器人业务库（只读检测结果等；生产与 robot-core 共用 PostgreSQL robot_platform）
-    robot_database_url: str = "sqlite:///data/robot-platform.db"
+    robot_database_url: str = ""
 
     # 鉴权（目标 API；默认关闭以保持旧前端联调契约，生产开启）
     auth_enabled: bool = False

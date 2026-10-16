@@ -13,16 +13,18 @@ dependencies = [
     "psycopg-pool>=3.2,<4",
 ]
 
-[project.optional-dependencies]
-# 硬件设备能力（串口等），仅工控机安装
-hardware = ["pyserial>=3.5,<4", "pyserial-asyncio>=0.6,<1"]
-# 媒体采集能力（相机 / 音频），仅采集相关进程安装
-media = ["opencv-python-headless>=4.9,<5", "sounddevice>=0.4,<1"]
-# 模型推理能力（受控模型包），仅 inference-worker 安装
-inference = ["torch>=2.2,<3", "ultralytics>=8.3,<9"]
-
 [dependency-groups]
 dev = ["pytest>=8,<9"]
+# 硬件设备能力（串口等），robot-core 使用
+hardware = ["pyserial>=3.5,<4", "pyserial-asyncio>=0.6,<1"]
+# 媒体采集能力（相机 / 音频），sensor-worker 使用
+media = ["opencv-python-headless>=4.9,<5", "sounddevice>=0.4,<1"]
+# 模型推理能力（torch / ultralytics），inference-worker 使用
+inference = ["torch>=2.2,<3", "ultralytics>=8.3,<9"]
+
+[tool.uv]
+# 默认全量安装：一条 `uv sync` 装齐全部；精简场景用 --no-group 排除对应组
+default-groups = ["dev", "hardware", "media", "inference"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

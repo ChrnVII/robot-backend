@@ -43,11 +43,11 @@ inspection:
   capture_fps: 3
   output_root: ../data/inspection
 storage:
-  # 本地开发：SQLite 回退（生产使用 hardware.yaml 的 PostgreSQL robot_platform）。
-  # 相对路径按运行目录（项目根）解析：请从 backend/ 目录启动进程。
-  backend: sqlite
-  database_url: data/robot-platform.db
-  database: data/robot-platform.db
+  # 本地开发：指向本机 PostgreSQL 实例（生产见 hardware.yaml）。
+  # ROBOT_DB_PASSWORD 通过环境变量注入；未设置时使用本地默认密码。
+  backend: postgresql
+  database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
+  database: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
   pool:
     min_size: 1
     max_size: 8

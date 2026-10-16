@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import random
-import sqlite3
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -13,29 +12,18 @@ from app.robot_core.contracts import CommandResult, ControlLease, DeviceCommand,
 from .db import PostgresConnectionPool, is_integrity_error, is_postgres_target
 
 
-class ClosingConnection(sqlite3.Connection):
-    """Commit or roll back, then release the SQLite file handle on context exit."""
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
 class PlatformStore:
-    """Local robot business store backed by PostgreSQL in production."""
+    """Robot business store backed by PostgreSQL."""
 
-    def __init__(self, path: Union[str, Path], *, pool_options: Optional[Mapping[str, Any]] = None):
-        self.database_url = str(path)
-        self.path = Path(path) if not is_postgres_target(path) else str(path)
-        if not is_postgres_target(path):
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, database_url: Union[str, Path], *, pool_options: Optional[Mapping[str, Any]] = None):
+        if not is_postgres_target(database_url):
+            raise ValueError(
+                "PlatformStore requires a PostgreSQL DSN, e.g. "
+                "postgresql+psycopg://robot:***@127.0.0.1:5432/robot_platform"
+            )
+        self.database_url = str(database_url)
         self._lock = threading.RLock()
-        self._postgres_pool = (
-            PostgresConnectionPool(self.database_url, **dict(pool_options or {}))
-            if is_postgres_target(path) else None
-        )
+        self._postgres_pool = PostgresConnectionPool(self.database_url, **dict(pool_options or {}))
         try:
             self.initialize()
         except Exception:
@@ -54,26 +42,16 @@ class PlatformStore:
         self.close()
 
     def connect(self):
-        if is_postgres_target(self.path):
-            if self._postgres_pool is None:  # pragma: no cover - defensive guard
-                raise RuntimeError("PostgreSQL connection pool is not initialized")
-            return self._postgres_pool.connection()
-        connection = sqlite3.connect(self.path, timeout=30, factory=ClosingConnection)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        return connection
+        if self._postgres_pool is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("PostgreSQL connection pool is not initialized")
+        return self._postgres_pool.connection()
 
     def initialize(self) -> None:
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._lock, self.connect() as connection:
-            if getattr(connection, "is_postgres", False):
-                # Serialize first-time initialization across robot-core and
-                # sync-agent processes on the same local PostgreSQL instance.
-                connection.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext('app.robot_core_schema_v1'))"
-                )
+            # Serialize first-time initialization across robot-core and
+            # sync-agent processes on the same PostgreSQL instance.
+            connection.execute("SELECT pg_advisory_xact_lock(hashtext('app.robot_core_schema_v1'))")
             connection.executescript(schema)
             self._upgrade_existing_tables(connection)
             connection.execute(
@@ -99,15 +77,12 @@ class PlatformStore:
             "inbox": {"idempotency_key": "TEXT"},
         }
         for table, columns in additions.items():
-            if getattr(connection, "is_postgres", False):
-                existing = {
-                    row["column_name"] for row in connection.execute(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = current_schema() AND table_name = ?", (table,)
-                    ).fetchall()
-                }
-            else:
-                existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            existing = {
+                row["column_name"] for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = ?", (table,)
+                ).fetchall()
+            }
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
@@ -120,16 +95,10 @@ class PlatformStore:
             "CREATE INDEX IF NOT EXISTS idx_outbox_claims "
             "ON outbox(state, next_retry_at, claimed_at, created_at)"
         )
-        if getattr(connection, "is_postgres", False):
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency "
-                "ON inbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
-            )
-        else:
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency "
-                "ON inbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
-            )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency "
+            "ON inbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
 
     @staticmethod
     def _json(value: Mapping[str, Any]) -> str:
@@ -314,9 +283,8 @@ class PlatformStore:
     def claim_outbox(self, limit: int = 50, lease_seconds: float = 60.0) -> list[Dict[str, Any]]:
         """Atomically claim deliverable events for one sync worker.
 
-        PostgreSQL uses ``FOR UPDATE SKIP LOCKED`` so multiple workers can
-        drain the same queue without sending the same event concurrently.  The
-        SQLite branch keeps the same lease semantics for tests and migrations.
+        ``FOR UPDATE SKIP LOCKED`` lets multiple workers drain the same queue
+        without sending the same event concurrently.
         """
         bounded_limit = max(1, min(int(limit), 500))
         if lease_seconds <= 0:
@@ -325,38 +293,11 @@ class PlatformStore:
         stale_before = (parse_utc(now) - timedelta(seconds=lease_seconds)).isoformat()
         token = new_id("claim")
         with self._lock, self.connect() as connection:
-            if getattr(connection, "is_postgres", False):
-                rows = connection.execute(
-                    """
-                    WITH candidates AS (
-                        SELECT outbox_id
-                        FROM outbox
-                        WHERE (
-                            state IN ('pending', 'retry')
-                            AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                        ) OR (
-                            state = 'claimed'
-                            AND claimed_at IS NOT NULL
-                            AND claimed_at < ?
-                        )
-                        ORDER BY created_at
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT ?
-                    )
-                    UPDATE outbox AS item
-                    SET state='claimed', claim_token=?, claimed_at=?,
-                        last_attempt_at=?, attempts=item.attempts + 1,
-                        delivery_count=item.delivery_count + 1
-                    FROM candidates
-                    WHERE item.outbox_id = candidates.outbox_id
-                    RETURNING item.*
-                    """,
-                    (now, stale_before, bounded_limit, token, now, now),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM outbox
+            rows = connection.execute(
+                """
+                WITH candidates AS (
+                    SELECT outbox_id
+                    FROM outbox
                     WHERE (
                         state IN ('pending', 'retry')
                         AND (next_retry_at IS NULL OR next_retry_at <= ?)
@@ -365,33 +306,20 @@ class PlatformStore:
                         AND claimed_at IS NOT NULL
                         AND claimed_at < ?
                     )
-                    ORDER BY created_at LIMIT ?
-                    """,
-                    (now, stale_before, bounded_limit),
-                ).fetchall()
-                claimed = []
-                for row in rows:
-                    updated = connection.execute(
-                        """
-                        UPDATE outbox
-                        SET state='claimed', claim_token=?, claimed_at=?,
-                            last_attempt_at=?, attempts=attempts + 1,
-                            delivery_count=delivery_count + 1
-                        WHERE outbox_id=? AND (
-                            (state IN ('pending', 'retry')
-                             AND (next_retry_at IS NULL OR next_retry_at <= ?))
-                            OR (state='claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
-                        )
-                        """,
-                        (token, now, now, row["outbox_id"], now, stale_before),
-                    )
-                    if getattr(updated, "rowcount", 1):
-                        refreshed = connection.execute(
-                            "SELECT * FROM outbox WHERE outbox_id=?", (row["outbox_id"],)
-                        ).fetchone()
-                        if refreshed is not None:
-                            claimed.append(refreshed)
-                rows = claimed
+                    ORDER BY created_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT ?
+                )
+                UPDATE outbox AS item
+                SET state='claimed', claim_token=?, claimed_at=?,
+                    last_attempt_at=?, attempts=item.attempts + 1,
+                    delivery_count=item.delivery_count + 1
+                FROM candidates
+                WHERE item.outbox_id = candidates.outbox_id
+                RETURNING item.*
+                """,
+                (now, stale_before, bounded_limit, token, now, now),
+            ).fetchall()
         return [self._decode_outbox(row) for row in rows]
 
     def mark_outbox_sent(
@@ -532,11 +460,8 @@ class PlatformStore:
 
     def table_names(self) -> set[str]:
         with self.connect() as connection:
-            if getattr(connection, "is_postgres", False):
-                rows = connection.execute(
-                    "SELECT table_name AS name FROM information_schema.tables "
-                    "WHERE table_schema = current_schema()"
-                ).fetchall()
-            else:
-                rows = connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            rows = connection.execute(
+                "SELECT table_name AS name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            ).fetchall()
         return {str(row["name"]) for row in rows}

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,16 +10,17 @@ from app.robot_core.inference import InferenceRuntime, TestModelAdapter
 from app.robot_core.contracts import InferenceRequest
 from app.robot_core.processes.robot_core import build
 
+TEST_DSN = os.environ["ROBOT_TEST_DATABASE_URL"]
+
 
 class M1FrameworkTest(unittest.TestCase):
     def test_dev_configuration_and_core_build(self):
-        """以 configs/dev.yaml 为模板、临时 SQLite 为库，验证核心可装配。"""
+        """以 configs/dev.yaml 为模板、测试库 DSN，验证核心可装配。"""
         source = Path(__file__).parents[3] / "configs" / "dev.yaml"
         values = yaml.safe_load(source.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as tmp:
-            database = str(Path(tmp) / "robot-platform.db")
-            values["storage"]["database_url"] = database
-            values["storage"]["database"] = database
+            values["storage"]["database_url"] = TEST_DSN
+            values["storage"]["database"] = TEST_DSN
             temp_config = Path(tmp) / "dev.yaml"
             temp_config.write_text(yaml.safe_dump(values, allow_unicode=True), encoding="utf-8")
             config = load_config(str(temp_config))

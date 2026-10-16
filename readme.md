@@ -44,10 +44,10 @@ app/
     common contracts control devices navigation mission sensing
     inference inspection events storage sync diagnostics core
     processes/            robot_core / sensor_worker / inference_worker / inspection_worker / sync_agent
-configs/                  base.yaml（模拟）/ dev.yaml（SQLite 本地）/ hardware.yaml（生产 PG+硬件）
+configs/                  base.yaml / dev.yaml（模拟，本机 PostgreSQL）/ hardware.yaml（生产 PG+硬件）
 models/hs_detect/weights/ 热应激检测模型（best.pt，sha256 已配置）
 tests/                    backend（后端接口/契约/WS/鉴权）+ robot_core（迁移的单元/契约/集成）
-deploy/                   systemd 单元 + target；.env.example
+deploy/                   systemd 单元模板 + target；启动脚本；robot.env.example
 ```
 
 分层与依赖规则：`api → services → gateways → ipc →（UDS）→ robot_core 进程`；
@@ -56,18 +56,21 @@ deploy/                   systemd 单元 + target；.env.example
 ## 快速开始
 
 ```bash
-uv sync                        # 基础依赖（开发机）
+uv sync                        # 全量依赖（一条命令装齐，含 torch / opencv / 串口）
 uv run fastapi dev             # 开发服务器 http://127.0.0.1:8000（默认 mock 网关）
 uv run pytest                  # 全量测试（118 项）
 
 # 生产形态（沿用旧端口 8100）
 uv run python -m uvicorn app.main:app --host 0.0.0.0 --port 8100
 
-# 本机运行机器人五进程（SQLite 开发配置，Linux/macOS 才有 UDS）
+# 本机运行机器人五进程（模拟配置 + 本机 PostgreSQL，Linux/macOS 才有 UDS）
 uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml --check
 ```
 
 **约定：所有命令从项目根目录（本目录）运行**，`data/`、`run/` 相对路径按此解析。
+
+数据库统一为 PostgreSQL（SQLite 支持已移除）：五进程连接 `configs/*.yaml` 中的 DSN，
+后端与测试分别读取 `ROBOT_DATABASE_URL` 与 `ROBOT_TEST_DATABASE_URL`。
 
 ## 契约与错误码
 
@@ -91,17 +94,18 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
 
 | 库 | 内容 | 写入方 |
 |---|---|---|
-| `ROBOT_DATABASE_URL`（默认 `data/robot-backend.db`） | 后端自有表：`ui_*` 工作台、`users`、`refresh_tokens` | 后端（crud 显式提交） |
-| `ROBOT_ROBOT_DATABASE_URL`（默认 `data/robot-platform.db`） | `inference_runs` / `media_assets` / `inference_detections` 等 | robot-core 独占写入；后端只读（检测分页） |
+| `ROBOT_DATABASE_URL` | 后端自有表：`ui_*` 工作台、`users`、`refresh_tokens` | 后端（crud 显式提交） |
+| `ROBOT_ROBOT_DATABASE_URL` | `inference_runs` / `media_assets` / `inference_detections` 等 | robot-core 独占写入；后端只读（检测分页） |
 
-生产均为 PostgreSQL `robot_platform`（见 .env.example）。表结构后端用
+两者均为 PostgreSQL（生产为 `robot_platform` 实例，见 robot.env.example）。表结构后端用
 `create_all` 启动建表；runtime 用 `schema.sql`（版本 5）。
 
 ## 模型与推理
 
 `configs/hardware.yaml` 指向 `models/hs_detect/weights/best.pt`（sha256 已校验一致）。
-推理依赖较重：在推理主机执行 `uv sync --extra inference`（torch / ultralytics）；
-媒体依赖（opencv / sounddevice）与硬件依赖（pyserial）同理按需加 `--extra media/hardware`。
+依赖默认全量安装（`pyproject.toml` 的 `default-groups`）：一条 `uv sync` 装齐
+torch / ultralytics / opencv / pyserial。精简场景按组排除：
+`uv sync --no-group inference`（跳过 torch），`media` / `hardware` 同理。
 
 ## 部署
 
@@ -118,12 +122,15 @@ systemd（五进程 + 后端 target）方案（含同步命令、目录准备与
 
 ## 测试
 
+测试运行在 PostgreSQL 测试库上（`ROBOT_TEST_DATABASE_URL`，默认 `…/robot_platform_test`，
+每个用例重建 schema 隔离；数据库不可用时整组跳过）。
+
 ```bash
 uv run pytest                    # 全部（robot_core 迁移用例 + 后端用例）
 uv run pytest tests/backend -v   # 后端接口/契约/WS/鉴权
 uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检/同步）
 ```
 
-覆盖：封套与 TraceId、mock 网关全接口、命令幂等与急停副作用、检测分页（真实 SQLite 联调）、
+覆盖：封套与 TraceId、mock 网关全接口、命令幂等与急停副作用、检测分页（真实 PostgreSQL 联调）、
 工作台 CRUD 与版本冲突、鉴权全流程、WebSocket 四通道与非法 ID、UDS 协议（Linux）、
 租约冲突/命令过期/运动限制等内核契约。
