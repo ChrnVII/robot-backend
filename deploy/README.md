@@ -88,7 +88,7 @@ systemd 安装会禁用旧独立 worker。重复绑定活跃 socket 会报错，
 ## 联调与开发（无硬件）
 
 ```bash
-uv sync                       # 全量依赖（含 torch/opencv/串口；默认组已配置）
+uv sync                       # 全量依赖（torch/opencv/串口/PyAV 均随项目依赖安装）
 uv run fastapi dev            # http://127.0.0.1:8000（需先启动控制与感知进程）
 uv run pytest                 # 全量测试（robot_core + 后端；需要 PostgreSQL 测试库）
 ```

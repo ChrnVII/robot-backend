@@ -151,9 +151,6 @@ DSN：后端 `ROBOT_DATABASE_URL`；控制、感知、同步分别支持
 ## 模型与推理
 
 `configs/hardware.yaml` 指向 `models/hs_detect/weights/best.pt`（sha256 锁定于配置）。
-依赖默认全量安装（`pyproject.toml` 的 `default-groups`）：一条 `uv sync` 装齐
-torch / ultralytics / opencv / pyserial。精简场景按组排除：
-`uv sync --no-group inference`（跳过 torch），`media` / `hardware` 同理。
 
 ## 部署
 
@@ -186,7 +183,7 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 
 后端 web 进程使用一路 RTSP，同时向浏览器推送 Annex-B 码流，并按需原样转封装为 MKV；不重编码。此次只实现预览与录像，既有实时检测配置默认关闭。原有云台、预置点和抓图接口继续独立工作。
 
-在 `robot.env` 配置 `ROBOT_CAMERA_STREAM_URL=rtsp://<user>:<encoded-password>@<host>:554/Streaming/Channels/102`，建议子码流使用 H.264。`uv sync` 默认包含 streaming 依赖组（PyAV）。浏览器低延迟预览需要 Chrome / Edge，并通过 HTTPS 或 localhost 访问；不具备解码条件时显示已鉴权的 JPEG 快照预览。
+在 `robot.env` 配置 `ROBOT_CAMERA_STREAM_URL=rtsp://<user>:<encoded-password>@<host>:554/Streaming/Channels/102`，建议子码流使用 H.264。浏览器低延迟预览需要 Chrome / Edge，并通过 HTTPS 或 localhost 访问；不具备解码条件时显示已鉴权的 JPEG 快照预览。
 
 录像在页面手动开始/停止，保存到 `ROBOT_CAMERA_RECORDINGS_DIR`（默认 `data/camera-recordings`，相对于后端工作目录）。起录等待关键帧，停止时排空队列并关闭容器；离开页面仍继续录制。RTSP 断线时结束当前文件，重连后从关键帧另开文件。写盘错误或队列积压时停止录像并报告错误，避免静默丢失参考帧。
 

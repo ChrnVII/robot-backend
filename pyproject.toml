@@ -4,6 +4,7 @@ version = "0.2.0"
 description = "巡检机器人业务后端（FastAPI）+ 控制与感知运行时"
 requires-python = ">=3.12"
 dependencies = [
+    # ---- 后端业务运行时（FastAPI / DB / 鉴权）----
     "fastapi[standard]>=0.141.1",
     "sqlalchemy>=2.0,<3",
     "pyjwt>=2.8,<3",
@@ -12,23 +13,20 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "psycopg-pool>=3.2,<4",
     "alembic>=1.14,<2",
+    # ---- 硬件设备能力（串口等），robot-core 使用 ----
+    "pyserial>=3.5,<4",
+    "pyserial-asyncio>=0.6,<1",
+    # ---- 媒体采集能力（相机 / 音频），感知进程使用 ----
+    "opencv-python-headless>=4.9,<5",
+    "sounddevice>=0.4,<1",
+    # ---- 低延迟实时预览（球形摄像头）：PyAV 自带 FFmpeg，负责 RTSP 解封装与转封装 ----
+    "av>=13,<16",
+    # ---- 模型推理能力（torch / ultralytics），感知进程使用 ----
+    "torch>=2.2,<3",
+    "ultralytics>=8.3,<9",
+    # ---- 测试 ----
+    "pytest>=8,<9",
 ]
-
-[dependency-groups]
-dev = ["pytest>=8,<9"]
-# 硬件设备能力（串口等），robot-core 使用
-hardware = ["pyserial>=3.5,<4", "pyserial-asyncio>=0.6,<1"]
-# 媒体采集能力（相机 / 音频），感知进程使用
-media = ["opencv-python-headless>=4.9,<5", "sounddevice>=0.4,<1"]
-# 低延迟实时预览（球形摄像头）：PyAV 自带 FFmpeg，负责 RTSP 解封装与转封装。
-# 后端 web 进程使用；未安装时该功能自动降级，不影响其余接口。
-streaming = ["av>=13,<16"]
-# 模型推理能力（torch / ultralytics），感知进程使用
-inference = ["torch>=2.2,<3", "ultralytics>=8.3,<9"]
-
-[tool.uv]
-# 默认全量安装：一条 `uv sync` 装齐全部；精简场景用 --no-group 排除对应组
-default-groups = ["dev", "hardware", "media", "streaming", "inference"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
