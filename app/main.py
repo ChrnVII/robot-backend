@@ -16,6 +16,7 @@ from app.api.ws.events import PgEventListener
 from app.api.ws.hub import get_push_hub, reset_push_hub
 from app.api.ws.routes import ws_router
 from app.common.config import Settings, get_settings
+from app.common.deployment import validate_backend_deployment
 from app.common.exceptions import register_exception_handlers
 from app.common.logging import setup_logging
 from app.common.middleware import TraceIdMiddleware
@@ -69,6 +70,7 @@ async def _close_gateways() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    validate_backend_deployment(settings)
     init_db()
     # 始终确保存在默认管理员（鉴权开启时用于首次登录；开启后请立即改密）
     from app.security.auth import ensure_default_admin

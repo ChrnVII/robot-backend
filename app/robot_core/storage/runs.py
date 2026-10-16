@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from sqlalchemy import text
+
 from app.robot_core.common import utc_now
 from app.robot_core.contracts import Event
 from .database import PlatformStore
@@ -19,35 +21,37 @@ class InspectionRunStore:
 
     def status(self, task_run_id: str) -> dict | None:
         with self.store.connect() as connection:
-            row = connection.execute("SELECT payload FROM inspection_runs WHERE task_run_id=?", (task_run_id,)).fetchone()
+            row = connection.execute_statement(text("SELECT payload FROM inspection_runs WHERE task_run_id=:run_id"),
+                                               {"run_id": task_run_id}).fetchone()
         return json.loads(row["payload"]) if row else None
 
     def save(self, payload: Mapping[str, Any]) -> None:
         now = utc_now()
         with self.store.connect() as connection:
-            previous = connection.execute(
-                "SELECT state FROM inspection_runs WHERE task_run_id=?", (payload["task_run_id"],)
+            previous = connection.execute_statement(
+                text("SELECT state FROM inspection_runs WHERE task_run_id=:run_id"), {"run_id": payload["task_run_id"]}
             ).fetchone()
-            connection.execute(
-                """INSERT INTO inspection_runs(task_run_id,state,payload,updated_at) VALUES (?,?,?,?)
+            connection.execute_statement(
+                text("""INSERT INTO inspection_runs(task_run_id,state,payload,updated_at) VALUES (:run_id,:state,:payload,:now)
                    ON CONFLICT(task_run_id) DO UPDATE SET state=excluded.state,
-                   payload=excluded.payload, updated_at=excluded.updated_at""",
-                (payload["task_run_id"], payload["state"], self.store._json(payload), now),
+                   payload=excluded.payload, updated_at=excluded.updated_at"""),
+                {"run_id": payload["task_run_id"], "state": payload["state"], "payload": self.store._json(payload), "now": now},
             )
             if previous is None or previous["state"] != payload["state"]:
                 event = Event("inspection.state_changed", "inspection-worker", str(payload.get("trace_id", payload["task_run_id"])), dict(payload))
-                connection.execute(
-                    "INSERT INTO events(event_id,event_type,source,trace_id,data,occurred_at,task_run_id) VALUES (?,?,?,?,?,?,?)",
-                    (event.event_id, event.event_type, event.source, event.trace_id,
-                     self.store._json(event.data), event.occurred_at, payload["task_run_id"]),
+                connection.execute_statement(
+                    text("""INSERT INTO events(event_id,event_type,source,trace_id,data,occurred_at,task_run_id)
+                            VALUES (:id,:type,:source,:trace,:data,:time,:run_id)"""),
+                    {"id": event.event_id, "type": event.event_type, "source": event.source, "trace": event.trace_id,
+                     "data": self.store._json(event.data), "time": event.occurred_at, "run_id": payload["task_run_id"]},
                 )
                 self.store._enqueue_event(connection, event)
             self.store._notify(connection, {"topic": "inspection", "task_run_id": payload["task_run_id"]})
 
     def recover(self) -> int:
         with self.store.connect() as connection:
-            rows = connection.execute(
-                "SELECT payload FROM inspection_runs WHERE state NOT IN ('completed','stopped','failed')"
+            rows = connection.execute_statement(
+                text("SELECT payload FROM inspection_runs WHERE state NOT IN ('completed','stopped','failed')")
             ).fetchall()
         for row in rows:
             payload = json.loads(row["payload"])
@@ -57,12 +61,13 @@ class InspectionRunStore:
 
     def detections(self, task_run_id: str, offset: int, limit: int) -> dict:
         with self.store.connect() as connection:
-            total = connection.execute(
-                "SELECT count(*) AS count FROM v_inference_run_results WHERE task_run_id=?", (task_run_id,)
+            total = connection.execute_statement(
+                text("SELECT count(*) AS count FROM v_inference_run_results WHERE task_run_id=:run_id"), {"run_id": task_run_id}
             ).fetchone()["count"]
-            rows = connection.execute(
-                """SELECT * FROM v_inference_run_results WHERE task_run_id=?
-                   ORDER BY finished_at,run_id LIMIT ? OFFSET ?""", (task_run_id, limit, offset)
+            rows = connection.execute_statement(
+                text("""SELECT * FROM v_inference_run_results WHERE task_run_id=:run_id
+                   ORDER BY finished_at,run_id LIMIT :limit OFFSET :offset"""),
+                {"run_id": task_run_id, "limit": limit, "offset": offset}
             ).fetchall()
         items = []
         for row in rows:

@@ -48,6 +48,7 @@ load_env() {
   else
     warn "未找到 $ENV_FILE（可 cp robot.env.example robot.env 创建），假定凭据已在当前 shell 环境中"
   fi
+  export ROBOT_PLATFORM_CONFIG="$CONFIG"
   local missing=()
   [ -z "${ROBOT_DB_PASSWORD:-}" ] && missing+=("ROBOT_DB_PASSWORD")
   [ -z "${CAMERA_PASSWORD:-}" ] && missing+=("CAMERA_PASSWORD")

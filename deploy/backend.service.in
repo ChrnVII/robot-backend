@@ -10,6 +10,7 @@ Group=__SERVICE_USER__
 WorkingDirectory=__PROJECT_DIR__
 EnvironmentFile=-__PROJECT_DIR__/robot.env
 Environment=PYTHONUNBUFFERED=1
+Environment=ROBOT_PLATFORM_CONFIG=__PROJECT_DIR__/configs/hardware.yaml
 Environment=ROBOT_ROBOT_CORE_SOCKET=__PROJECT_DIR__/run/robot-core.sock
 Environment=ROBOT_SENSOR_WORKER_SOCKET=__PROJECT_DIR__/run/sensor-worker.sock
 Environment=ROBOT_INSPECTION_WORKER_SOCKET=__PROJECT_DIR__/run/inspection-worker.sock

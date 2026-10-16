@@ -1,38 +1,16 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-import yaml
 
 
-class ConfigurationError(ValueError):
-    pass
-
-
-_ENVIRONMENT_VALUE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
-
-
-def _expand_environment(value: Any) -> Any:
-    """Expand ``${NAME}`` and ``${NAME:-default}`` in YAML scalar values."""
-    if isinstance(value, str):
-        def replace(match: re.Match[str]) -> str:
-            name, default = match.group(1), match.group(2)
-            if name in os.environ:
-                return os.environ[name]
-            if default is not None:
-                return default
-            raise ConfigurationError(f"environment variable {name} is required")
-
-        return _ENVIRONMENT_VALUE.sub(replace, value)
-    if isinstance(value, list):
-        return [_expand_environment(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _expand_environment(item) for key, item in value.items()}
-    return value
+from app.common.deployment import (
+    ConfigurationError, expand_environment as _expand_environment,
+    load_platform_values, validate_deployment,
+)
 
 
 def redact_database_url(value: str) -> str:
@@ -99,11 +77,7 @@ REQUIRED_SECTIONS = {
 def load_config(path: Optional[str] = None) -> PlatformConfig:
     root = Path(__file__).resolve().parents[3]
     source = Path(path or os.environ.get("ROBOT_PLATFORM_CONFIG", root / "configs" / "base.yaml")).resolve()
-    with source.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
-    value = _expand_environment(value)
-    if not isinstance(value, dict):
-        raise ConfigurationError("configuration root must be a mapping")
+    value = load_platform_values(source)
     missing = REQUIRED_SECTIONS - set(value)
     unknown = set(value) - (REQUIRED_SECTIONS | {"schema_version", "devices", "inspection"})
     if missing or unknown:
@@ -128,4 +102,5 @@ def load_config(path: Optional[str] = None) -> PlatformConfig:
     timeout = float(pool.get("timeout_seconds", 10.0))
     if min_size < 1 or max_size < min_size or timeout <= 0:
         raise ConfigurationError("storage.pool must satisfy 1 <= min_size <= max_size and timeout_seconds > 0")
+    validate_deployment(value, os.environ)
     return PlatformConfig(source=source, values=value)

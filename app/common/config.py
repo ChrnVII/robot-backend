@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # 机器人身份与运行模式（对应旧 robot.robot-id / robot.mode）
     robot_id: str = "robot-dev-001"
+    platform_config: str = ""  # Shared YAML path, checked at startup when configured.
     mode: str = "simulated"  # simulated | hardware
 
     # 机器人进程网关：通过 Linux 工控机 UDS（Unix domain socket）通信

@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
+from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+from sqlalchemy.sql.elements import TextClause
+
 
 DatabaseTarget = Union[str, Path]
 _QMARK = re.compile(r"\?")
@@ -56,6 +59,18 @@ class PostgresConnection:
         if isinstance(params, Mapping):
             return self._connection.execute(translated, params)
         return self._connection.execute(translated, tuple(params or ()))
+
+    def execute_statement(self, statement: TextClause, params: Mapping[str, Any] | None = None):
+        """Compile named SQL with SQLAlchemy, retaining this pool and transaction.
+
+        New repositories bypass the legacy regex placeholder converter. SQLAlchemy
+        handles quoted strings, PostgreSQL casts, percent signs and expanding binds.
+        No second engine/pool or independent transaction is created.
+        """
+        compiled = statement.bindparams(**(params or {})).compile(
+            dialect=PGDialect_psycopg(), compile_kwargs={"render_postcompile": True},
+        )
+        return self._connection.execute(str(compiled), compiled.params)
 
     def executemany(self, sql: str, params: Iterable[Union[Iterable[Any], Mapping[str, Any]]]):
         translated = _qmark_to_pyformat(sql)

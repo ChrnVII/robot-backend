@@ -23,6 +23,7 @@ from app.contracts.errors import (
 from app.contracts.wire import (
     Channels,
     CommandWire,
+    InspectionRequestWire,
     EmergencyStopWire,
     EventTopic,
     LeaseAcquireWire,
@@ -34,6 +35,7 @@ from app.contracts.wire import (
 __all__ = [
     "Channels",
     "CommandWire",
+    "InspectionRequestWire",
     "EmergencyStopWire",
     "EventTopic",
     "IpcErrorCode",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from app.contracts import Op
+from app.contracts import InspectionRequestWire, Op
 from app.robot_core.common.config import load_config
 from app.robot_core.inspection import InspectionService
 from app.ipc import JsonSocketServer
@@ -50,6 +50,39 @@ class PerceptionWorker:
         self.store.close()
 
 
+async def handle_inspection_request(service: InspectionService, request: dict) -> dict:
+    operation = str(request.get("operation", ""))
+    if operation == Op.HEALTH:
+        return service.health()
+    request = InspectionRequestWire.from_mapping(request).to_payload()
+    if operation == Op.TASK_LATEST_FRAME:
+        return service.latest_frame(
+            str(request["task_run_id"]),
+            str(request["camera_id"]) if request.get("camera_id") else None,
+        )
+    if operation == Op.TASK_LATEST_FRAMES:
+        return service.latest_frames(str(request["task_run_id"]))
+    if operation == Op.TASK_START:
+        return await asyncio.to_thread(service.start, request)
+    if operation == Op.TASK_STOP:
+        return await asyncio.to_thread(service.stop, str(request["task_run_id"]))
+    if operation == Op.TASK_STATUS:
+        task_run_id = request.get("task_run_id")
+        return await asyncio.to_thread(service.status, str(task_run_id) if task_run_id else None)
+    if operation == Op.TASK_SNAPSHOT:
+        return await asyncio.to_thread(service.snapshot, str(request["task_run_id"]),
+            camera_id=request.get("camera_id"), include_detections=bool(request.get("include_detections", True)))
+    if operation == Op.TASK_DETECTIONS:
+        return await asyncio.to_thread(service.detections,
+            str(request["task_run_id"]),
+            offset=int(request.get("offset", 0)),
+            limit=int(request.get("limit", 50)),
+        )
+    if operation == Op.TASK_RESOLVE_IMAGE:
+        return service.resolve_image(str(request["task_run_id"]), str(request["image_id"]))
+    raise ValueError("unsupported operation")
+
+
 def main() -> None:
     args = parser("inspection-worker").parse_args()
     config = load_config(args.config)
@@ -67,35 +100,7 @@ def main() -> None:
         return
 
     async def handler(request):
-        operation = str(request.get("operation", ""))
-        if operation == Op.HEALTH:
-            return service.health()
-        if operation == Op.TASK_LATEST_FRAME:
-            return service.latest_frame(
-                str(request["task_run_id"]),
-                str(request["camera_id"]) if request.get("camera_id") else None,
-            )
-        if operation == Op.TASK_LATEST_FRAMES:
-            return service.latest_frames(str(request["task_run_id"]))
-        if operation == Op.TASK_START:
-            return await asyncio.to_thread(service.start, request)
-        if operation == Op.TASK_STOP:
-            return await asyncio.to_thread(service.stop, str(request["task_run_id"]))
-        if operation == Op.TASK_STATUS:
-            task_run_id = request.get("task_run_id")
-            return await asyncio.to_thread(service.status, str(task_run_id) if task_run_id else None)
-        if operation == Op.TASK_SNAPSHOT:
-            return await asyncio.to_thread(service.snapshot, str(request["task_run_id"]),
-                camera_id=request.get("camera_id"), include_detections=bool(request.get("include_detections", True)))
-        if operation == Op.TASK_DETECTIONS:
-            return await asyncio.to_thread(service.detections,
-                str(request["task_run_id"]),
-                offset=int(request.get("offset", 0)),
-                limit=int(request.get("limit", 50)),
-            )
-        if operation == Op.TASK_RESOLVE_IMAGE:
-            return service.resolve_image(str(request["task_run_id"]), str(request["image_id"]))
-        raise ValueError("unsupported operation")
+        return await handle_inspection_request(service, request)
 
     async def serve():
         inspection_server = JsonSocketServer(config.path("ipc", "inspection_worker"), handler)

@@ -127,6 +127,18 @@ set -a; . ./robot.env; set +a
 `ROBOT_CORE_DATABASE_URL`、`ROBOT_PERCEPTION_DATABASE_URL`、`ROBOT_SYNC_DATABASE_URL`。
 这几个地址应指向同一数据库，使用不同角色；未设置运行时地址时继续使用 YAML 原地址。
 
+启动时会检查 YAML 与环境变量中的机器人身份、运行模式和数据库目标是否一致，冲突则停止启动；
+检查不连接数据库，也不会在错误信息中输出密码。数据库账号和密码可以不同，目标主机、端口、库名须一致。
+`localhost`、`127.0.0.1`、`::1` 按本机目标比较，Unix socket 地址通过 DSN 的 `host` 查询参数比较。
+数据库目标须显式提供主机（或 Unix socket 目录）和库名，不支持通过 libpq service 文件隐式指定目标。
+快速启动脚本会把所选 YAML 传给后端，systemd 模板使用 `configs/hardware.yaml`；
+手动启动后端时设置 `ROBOT_PLATFORM_CONFIG` 可启用相同检查（包含后端从 `robot.env` 读取的实际配置）。
+
+内部巡检请求由共享契约校验，非法字段统一返回 `INVALID_REQUEST`；REST、WebSocket 与 Base64 图片格式保持不变。
+巡检仓储已使用 SQLAlchemy 编译命名参数，继续复用 psycopg 连接池，状态、事件、outbox 和通知仍处于同一事务；
+其余旧仓储保留兼容层，可逐个迁移。架构分层静态检查纳入默认 pytest，阻止 API/服务直接依赖运行时实现，
+以及运行时反向依赖后端业务层。
+
 控制进程仅写控制与状态表；感知进程写媒体、推理、巡检表；后端仅写工作台与鉴权表、读结果视图。
 事件与 outbox 随业务变更在同一事务提交。感知进程重启后，中断任务使用原 `failed` 状态返回，保留进度，
 需要重新创建任务。SIGTERM 会关闭 socket、停止任务并释放相机与模型。

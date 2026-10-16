@@ -21,8 +21,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
 
-from app.contracts import Op
-from app.common.exceptions import AppError
+from app.contracts import InspectionRequestWire, IpcErrorCode, Op, WireError
+from app.common.exceptions import AppError, InspectionWorkerError
 from app.db.database import get_engine
 from app.gateways.base import camelize
 from app.gateways.inspection_worker import InspectionWorkerGateway
@@ -39,6 +39,13 @@ class InspectionService:
     def __init__(self, gateway: InspectionWorkerGateway) -> None:
         self._gateway = gateway
 
+    async def _call(self, request: dict) -> dict:
+        try:
+            payload = InspectionRequestWire.from_mapping(request).to_payload()
+        except WireError as error:
+            raise InspectionWorkerError(IpcErrorCode.INVALID_REQUEST, str(error)) from error
+        return await self._gateway.call(payload)
+
     async def start(self, request: StartInspectionRequest) -> dict:
         value: dict[str, Any] = {
             "operation": Op.TASK_START,
@@ -50,7 +57,7 @@ class InspectionService:
             value["task_run_id"] = request.taskRunId
         if request.cameraIds:
             value["camera_ids"] = list(request.cameraIds)
-        return camelize(await self._gateway.call(value))
+        return camelize(await self._call(value))
 
     async def start_video_stream(self, request: StartVideoStreamRequest) -> dict:
         value: dict[str, Any] = {
@@ -63,16 +70,16 @@ class InspectionService:
             value["task_run_id"] = request.streamId
         if request.cameraIds:
             value["camera_ids"] = list(request.cameraIds)
-        return camelize(await self._gateway.call(value))
+        return camelize(await self._call(value))
 
     async def stop(self, task_run_id: str) -> dict:
-        return camelize(await self._gateway.call({"operation": Op.TASK_STOP, "task_run_id": task_run_id}))
+        return camelize(await self._call({"operation": Op.TASK_STOP, "task_run_id": task_run_id}))
 
     async def status(self, task_run_id: str) -> dict:
-        return camelize(await self._gateway.call({"operation": Op.TASK_STATUS, "task_run_id": task_run_id}))
+        return camelize(await self._call({"operation": Op.TASK_STATUS, "task_run_id": task_run_id}))
 
     async def detections(self, task_run_id: str, offset: int, limit: int) -> dict:
-        return camelize(await self._gateway.call({
+        return camelize(await self._call({
             "operation": Op.TASK_DETECTIONS, "task_run_id": task_run_id, "offset": offset, "limit": limit,
         }))
 
@@ -80,11 +87,11 @@ class InspectionService:
         request: dict[str, Any] = {"operation": Op.TASK_LATEST_FRAME, "task_run_id": task_run_id}
         if camera_id:
             request["camera_id"] = camera_id
-        value = await self._gateway.call(request)
+        value = await self._call(request)
         return camelize(await asyncio.to_thread(_render_frames, value))
 
     async def latest_frames(self, task_run_id: str) -> dict:
-        value = await self._gateway.call({"operation": Op.TASK_LATEST_FRAMES, "task_run_id": task_run_id})
+        value = await self._call({"operation": Op.TASK_LATEST_FRAMES, "task_run_id": task_run_id})
         return camelize(await asyncio.to_thread(_render_frames, value))
 
     async def snapshot(self, task_run_id: str, *, camera_id: str | None = None,
@@ -93,11 +100,11 @@ class InspectionService:
                    "include_detections": include_detections}
         if camera_id:
             request["camera_id"] = camera_id
-        value = await self._gateway.call(request)
+        value = await self._call(request)
         return camelize(await asyncio.to_thread(_render_frames, value))
 
     async def resolve_image(self, task_run_id: str, image_id: str) -> ResolvedImage:
-        value = await self._gateway.call({
+        value = await self._call({
             "operation": Op.TASK_RESOLVE_IMAGE, "task_run_id": task_run_id, "image_id": image_id,
         })
         return ResolvedImage(

@@ -29,6 +29,7 @@ def test_three_process_http_video_capture_emergency_and_shutdown():
     with tempfile.TemporaryDirectory(prefix="robot-smoke-") as temporary:
         directory = Path(temporary)
         config = yaml.safe_load((root / "configs/dev.yaml").read_text())
+        config["robot"]["robot_id"] = "robot-test"
         config["storage"].update(database_url=dsn, database=dsn, media_root=str(directory / "media"))
         config["inspection"].update(output_root=str(directory / "inspection"), capture_fps=10)
         config["devices"]["camera"].update(width=32, height=24)
@@ -41,7 +42,7 @@ def test_three_process_http_video_capture_emergency_and_shutdown():
             port = candidate.getsockname()[1]
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "ROBOT_DATABASE_URL": dsn,
                "ROBOT_CORE_DATABASE_URL": dsn, "ROBOT_PERCEPTION_DATABASE_URL": dsn,
-               "ROBOT_AUTO_MIGRATE": "false", "ROBOT_AUTH_ENABLED": "false",
+               "ROBOT_PLATFORM_CONFIG": str(config_path), "ROBOT_AUTO_MIGRATE": "false", "ROBOT_AUTH_ENABLED": "false",
                "ROBOT_ROBOT_ID": "robot-test", "ROBOT_MODE": "simulated",
                "ROBOT_DEFAULT_ADMIN_USERNAME": "admin", "ROBOT_DEFAULT_ADMIN_PASSWORD": "admin123",
                "ROBOT_ROBOT_CORE_SOCKET": config["ipc"]["robot_core"],

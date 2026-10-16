@@ -10,10 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+import math
+import re
 
 
 class WireError(ValueError):
     """IPC 载荷不符合契约（缺失字段 / 非法值）。"""
+
+
+def _identifier(value: Any, key: str, maximum: int = 128) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,%d}" % maximum, value):
+        raise WireError(f"invalid identifier: {key}")
 
 
 class Op:
@@ -181,3 +188,56 @@ class EmergencyStopWire:
             reason=_optional_str(value, "reason", "requested"),
             trace_id=str(_require(value, "trace_id")),
         )
+
+
+@dataclass(frozen=True)
+class InspectionRequestWire:
+    """Validate inspection IPC without changing optional fields or legacy defaults."""
+
+    value: Mapping[str, Any]
+
+    def to_payload(self) -> dict[str, Any]:
+        return dict(self.value)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "InspectionRequestWire":
+        operation = _require(value, "operation")
+        supported = {Op.TASK_START, Op.TASK_STOP, Op.TASK_STATUS, Op.TASK_DETECTIONS,
+                     Op.TASK_LATEST_FRAME, Op.TASK_LATEST_FRAMES, Op.TASK_SNAPSHOT, Op.TASK_RESOLVE_IMAGE}
+        if not isinstance(operation, str) or operation not in supported:
+            raise WireError("unsupported inspection operation")
+        run_id = value.get("task_run_id")
+        if run_id is not None:
+            _identifier(run_id, "task_run_id")
+        elif operation not in {Op.TASK_START, Op.TASK_STATUS}:
+            _require(value, "task_run_id")
+        if value.get("camera_id") is not None:
+            _identifier(value["camera_id"], "camera_id", 64)
+        if operation == Op.TASK_START:
+            mode = value.get("mode", "single")
+            if not isinstance(mode, str) or mode not in {"single", "four", "eight", "custom"}:
+                raise WireError("invalid mode")
+            pipeline = value.get("pipeline", "inference")
+            if not isinstance(pipeline, str) or pipeline not in {"inference", "passthrough"}:
+                raise WireError("invalid pipeline")
+            duration = value.get("duration_seconds", 0)
+            if type(duration) not in {int, float} or not math.isfinite(duration) or duration < 0:
+                raise WireError("duration_seconds must be finite and non-negative")
+            cameras = value.get("camera_ids", [])
+            if not isinstance(cameras, list) or len(cameras) > 8:
+                raise WireError("camera_ids must be a list with at most eight items")
+            for camera in cameras:
+                _identifier(camera, "camera_ids", 64)
+            if len(set(cameras)) != len(cameras) or (mode == "custom" and not cameras):
+                raise WireError("camera_ids must be unique and non-empty for custom mode")
+        if operation == Op.TASK_DETECTIONS:
+            for key, default in (("offset", 0), ("limit", 50)):
+                if type(value.get(key, default)) is not int:
+                    raise WireError(f"{key} must be an integer")
+        if operation == Op.TASK_SNAPSHOT and type(value.get("include_detections", True)) is not bool:
+            raise WireError("include_detections must be a boolean")
+        if operation == Op.TASK_RESOLVE_IMAGE:
+            image_id = _require(value, "image_id")
+            if not isinstance(image_id, str) or not image_id:
+                raise WireError("image_id must be a non-empty string")
+        return cls(dict(value))
