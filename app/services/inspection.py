@@ -22,11 +22,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
 
 from app.contracts import InspectionRequestWire, IpcErrorCode, Op, WireError
-from app.common.exceptions import AppError, InspectionWorkerError
+from app.common.exceptions import AppError, InspectionWorkerError, ValidationFailed
 from app.db.database import get_engine
 from app.gateways.base import camelize
 from app.gateways.inspection_worker import InspectionWorkerGateway
 from app.schemas.inspection import StartInspectionRequest, StartVideoStreamRequest
+from app.services.cameras import CameraDirectoryService
 
 
 @dataclass(frozen=True)
@@ -36,8 +37,30 @@ class ResolvedImage:
 
 
 class InspectionService:
-    def __init__(self, gateway: InspectionWorkerGateway) -> None:
+    def __init__(self, gateway: InspectionWorkerGateway, directory: CameraDirectoryService) -> None:
         self._gateway = gateway
+        self._directory = directory
+
+    def _validate_cameras(self, camera_ids: list[str], mode: str) -> None:
+        """提交前按相机目录校验编号，把引擎里的英文错误换成可读提示。
+
+        未配置平台 YAML 时无法判断本机有哪几路，交给 inspection-worker 兜底。
+        """
+        if not self._directory.configured:
+            return
+        known = self._directory.inspection_ids()
+        if camera_ids:
+            missing = [camera_id for camera_id in camera_ids if camera_id not in known]
+            if missing:
+                raise ValidationFailed(
+                    f"未配置的相机编号：{', '.join(missing)}；可用编号：{', '.join(known) or '（没有已启用的巡检相机）'}"
+                )
+            return
+        expected = {"single": 1, "four": 4, "eight": 8}.get(mode)
+        if expected and len(known) < expected:
+            raise ValidationFailed(
+                f"mode={mode} 需要 {expected} 路已启用的相机，当前配置只有 {len(known)} 路：{', '.join(known) or '无'}"
+            )
 
     async def _call(self, request: dict) -> dict:
         try:
@@ -47,6 +70,7 @@ class InspectionService:
         return await self._gateway.call(payload)
 
     async def start(self, request: StartInspectionRequest) -> dict:
+        self._validate_cameras(list(request.cameraIds), request.mode)
         value: dict[str, Any] = {
             "operation": Op.TASK_START,
             "mode": request.mode,
@@ -60,6 +84,7 @@ class InspectionService:
         return camelize(await self._call(value))
 
     async def start_video_stream(self, request: StartVideoStreamRequest) -> dict:
+        self._validate_cameras(list(request.cameraIds), request.mode)
         value: dict[str, Any] = {
             "operation": Op.TASK_START,
             "mode": request.mode,

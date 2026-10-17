@@ -16,6 +16,7 @@ from app.db.database import get_db
 from app.gateways.inspection_worker import InspectionWorkerGateway, create_inspection_worker_gateway
 from app.gateways.robot_core import RobotCoreGateway, create_robot_core_gateway
 from app.gateways.sensor_worker import SensorWorkerGateway, create_sensor_worker_gateway
+from app.services.cameras import CameraDirectoryService
 from app.services.control import ControlService
 from app.services.inspection import InferenceQueryService, InspectionService
 from app.services.media import MediaService
@@ -53,13 +54,18 @@ def get_control_service() -> ControlService:
 
 
 @lru_cache(maxsize=1)
+def get_camera_directory() -> CameraDirectoryService:
+    return CameraDirectoryService(get_settings())
+
+
+@lru_cache(maxsize=1)
 def get_media_service() -> MediaService:
-    return MediaService(get_sensor_worker_gateway())
+    return MediaService(get_sensor_worker_gateway(), get_camera_directory())
 
 
 @lru_cache(maxsize=1)
 def get_inspection_service() -> InspectionService:
-    return InspectionService(get_inspection_worker_gateway())
+    return InspectionService(get_inspection_worker_gateway(), get_camera_directory())
 
 
 @lru_cache(maxsize=1)

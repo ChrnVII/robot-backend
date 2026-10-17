@@ -156,8 +156,22 @@ def test_recording_http_contract_and_validation(tmp_path, monkeypatch):
             assert client.post('/api/v1/cam/recordings', json={'action': 'start'}).json()['data']['recording']
             assert not client.post('/api/v1/cam/recordings', json={'action': 'stop'}).json()['data']['recording']
             (tmp_path / 'test.mkv').write_bytes(b'recorded-content')
-            listing = client.get('/api/v1/cam/recordings').json()['data']
-            assert listing[0]['name'] == 'test.mkv'
+            payload = client.get('/api/v1/cam/recordings').json()['data']
+            # 列表与目录一起返回：前端「打开文件夹」直接用这个绝对路径，不再询问用户
+            assert payload['rows'][0]['name'] == 'test.mkv'
+            assert payload['dir'] == str(tmp_path.resolve())
+
+            # 打开目录只在服务端执行；测试里替换掉实际拉起资源管理器的那一步
+            monkeypatch.setattr(system, '_reveal_in_file_manager', lambda path: (True, ''))
+            opened = client.post('/api/v1/cam/recordings/open').json()['data']
+            assert opened['opened'] is True
+            assert opened['dir'] == str(tmp_path.resolve())
+
+            # 无桌面会话时不算失败：返回 opened=False，前端会退回复制路径
+            monkeypatch.setattr(system, '_reveal_in_file_manager', lambda path: (False, 'no desktop'))
+            fallback = client.post('/api/v1/cam/recordings/open').json()['data']
+            assert fallback['opened'] is False
+            assert fallback['detail'] == 'no desktop'
             recorder.current_file = 'test.mkv'
             assert client.get('/api/v1/cam/recordings/test.mkv').status_code == 409
             assert client.delete('/api/v1/cam/recordings/test.mkv').status_code == 409

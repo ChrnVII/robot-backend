@@ -7,19 +7,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 
-from app.api.deps import get_workbench_service
+from app.api.deps import get_camera_directory, get_workbench_service
 from app.common.exceptions import ValidationFailed
 from app.common.responses import ok, trace_of
+from app.services.cameras import CameraDirectoryService
 from app.services.workbench import WorkbenchService
 
 router = APIRouter()
 
 
 @router.get("/tasks", tags=["workbench"])
-def list_tasks(request: Request, service: WorkbenchService = Depends(get_workbench_service)) -> dict:
-    return ok(service.list_tasks(), trace_of(request))
+def list_tasks(
+    request: Request,
+    page: int | None = Query(default=None, ge=1, description="页码从 1 开始；不传返回全量数组"),
+    pageSize: int | None = Query(default=None, ge=1, le=500, description="每页条数"),
+    keyword: str = Query(default="", description="按任务名称 / 任务 ID 模糊搜索"),
+    enabled: str | None = Query(default=None, description="on / off，缺省不过滤"),
+    service: WorkbenchService = Depends(get_workbench_service),
+) -> dict:
+    return ok(
+        service.list_tasks(page=page, page_size=pageSize, keyword=keyword, enabled=enabled),
+        trace_of(request),
+    )
 
 
 @router.post("/tasks", tags=["workbench"])
@@ -66,8 +77,18 @@ def delete_template(
 
 
 @router.get("/runs", tags=["workbench"])
-def list_runs(request: Request, service: WorkbenchService = Depends(get_workbench_service)) -> dict:
-    return ok(service.list_runs(), trace_of(request))
+def list_runs(
+    request: Request,
+    page: int | None = Query(default=None, ge=1, description="页码从 1 开始；不传返回全量数组"),
+    pageSize: int | None = Query(default=None, ge=1, le=500, description="每页条数"),
+    keyword: str = Query(default="", description="按执行 ID / 任务 ID 模糊搜索"),
+    status: str | None = Query(default=None, description="执行状态码，缺省不过滤"),
+    service: WorkbenchService = Depends(get_workbench_service),
+) -> dict:
+    return ok(
+        service.list_runs(page=page, page_size=pageSize, keyword=keyword, status=status),
+        trace_of(request),
+    )
 
 
 @router.post("/runs/{run_id}/resume", tags=["workbench"])
@@ -91,8 +112,21 @@ def delete_run(
 
 
 @router.get("/alerts", tags=["workbench"])
-def list_alerts(request: Request, service: WorkbenchService = Depends(get_workbench_service)) -> dict:
-    return ok(service.list_alerts(), trace_of(request))
+def list_alerts(
+    request: Request,
+    page: int | None = Query(default=None, ge=1, description="页码从 1 开始；不传返回全量数组"),
+    pageSize: int | None = Query(default=None, ge=1, le=500, description="每页条数"),
+    keyword: str = Query(default="", description="按告警内容 / 告警 ID / 执行 ID 模糊搜索"),
+    level: str | None = Query(default=None, description="告警等级，缺省不过滤"),
+    status: str | None = Query(default=None, description="处理状态，缺省不过滤"),
+    service: WorkbenchService = Depends(get_workbench_service),
+) -> dict:
+    return ok(
+        service.list_alerts(
+            page=page, page_size=pageSize, keyword=keyword, level=level, status=status
+        ),
+        trace_of(request),
+    )
 
 
 @router.post("/alerts/{alert_id}", tags=["workbench"])
@@ -149,7 +183,13 @@ def save_stations(
 
 
 @router.get("/cam/presets", tags=["workbench"])
-def list_presets(request: Request, service: WorkbenchService = Depends(get_workbench_service)) -> dict:
+def list_presets(
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    service: WorkbenchService = Depends(get_workbench_service),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
+    directory.require_ptz(cameraId)
     return ok(service.list_presets(), trace_of(request))
 
 
@@ -158,7 +198,9 @@ def save_preset(
     request: Request,
     body: dict[str, Any] = Body(default_factory=dict),
     service: WorkbenchService = Depends(get_workbench_service),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
 ) -> dict:
+    directory.require_ptz(body.get("cameraId"))
     try:
         preset_id = int(str(body.get("id")))
     except (TypeError, ValueError) as exc:
@@ -171,8 +213,11 @@ def save_preset(
 def delete_preset(
     request: Request,
     preset_id: int,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
     service: WorkbenchService = Depends(get_workbench_service),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
 ) -> dict:
+    directory.require_ptz(cameraId)
     service.delete_preset(preset_id)
     return ok({"deleted": True}, trace_of(request))
 

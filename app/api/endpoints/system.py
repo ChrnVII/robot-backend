@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel
@@ -16,12 +19,13 @@ from urllib.request import url2pathname
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 
-from app.api.deps import current_settings, get_media_service, get_robot_service
+from app.api.deps import current_settings, get_camera_directory, get_media_service, get_robot_service
 from app.common.clock import utc_now_iso
 from app.common.exceptions import AppError
 from app.common.responses import ok, trace_of
 from app.schemas.media import MediaCaptureRequest
 from app.schemas.system import PlatformResponse
+from app.services.cameras import CameraDirectoryService
 from app.services.media import MediaService
 from app.services.robot import RobotService
 from app.video import get_camera_stream_service
@@ -64,12 +68,15 @@ async def camera_stream(
     request: Request,
     preset: int | None = Query(default=None),
     frame: str | None = Query(default=None),
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
     media: MediaService = Depends(get_media_service),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
 ) -> FileResponse:
     """返回一张真实 JPEG 快照（控制台预览轮询）；迁移 SystemController.cameraStream。
 
     低延迟预览（/ws/camera/preview）不可用时，前端回退到这里；两条链路互不影响。
     """
+    directory.require_ptz(cameraId)
     task_run_id = f"preview-{_safe_token(frame, 'live')}"
     waypoint = "preview" if preset is None else f"preset-{preset}"
     asset = await media.capture(MediaCaptureRequest(
@@ -86,8 +93,13 @@ async def camera_stream(
 
 
 @router.get("/cam/stream/status", tags=["system"])
-def camera_stream_status(request: Request) -> dict:
+def camera_stream_status(
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
     """球形摄像头低延迟预览的诊断快照（是否启用、编码、分辨率、订阅者、丢帧）。"""
+    directory.require_ptz(cameraId)
     return ok(get_camera_stream_service().status(), trace_of(request))
 
 
@@ -109,12 +121,69 @@ class RecordingControl(BaseModel):
 
 
 @router.get("/cam/recordings", tags=["system"])
-def camera_recordings(request: Request) -> dict:
-    return ok(get_camera_stream_service().recorder.files(), trace_of(request))
+def camera_recordings(
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
+    directory.require_ptz(cameraId)
+    recorder = get_camera_stream_service().recorder
+    # 同时返回目录绝对路径：前端「打开文件夹」需要它，且不需要用户手填。
+    return ok({"rows": recorder.files(), "dir": str(recorder.directory)}, trace_of(request))
+
+
+def _reveal_in_file_manager(path: str) -> tuple[bool, str]:
+    """在**后端所在主机**上拉起系统文件管理器，返回 (是否成功, 失败原因)。
+
+    浏览器安全策略禁止 http(s) 页面导航到 file://，所以「打开录像目录」只能由
+    服务端执行。路径统一取服务里配置好的目录，不接受调用方传入，
+    避免这个接口退化成任意路径打开器。
+    """
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # noqa: S606 - 固定配置目录，非用户输入
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])  # noqa: S603
+        else:
+            subprocess.Popen(["xdg-open", path])  # noqa: S603
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 - 无桌面会话 / 命令缺失都走降级
+        return False, str(exc)
+
+
+@router.post("/cam/recordings/open", tags=["system"])
+def open_camera_recordings_dir(
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
+    """打开球形摄像头录像目录（服务端执行）。
+
+    打不开不算错误：无桌面会话的部署下前端会退回到「复制路径」。
+    """
+    directory.require_ptz(cameraId)
+    recorder = get_camera_stream_service().recorder
+    target = recorder.directory
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AppError("录像目录不可写", code="RECORDING_STORAGE_ERROR", status_code=503) from exc
+
+    opened, detail = _reveal_in_file_manager(str(target))
+    payload: dict[str, object] = {"opened": opened, "dir": str(target)}
+    if not opened:
+        payload["detail"] = detail
+    return ok(payload, trace_of(request))
 
 
 @router.post("/cam/recordings", tags=["system"])
-def control_camera_recording(body: RecordingControl, request: Request) -> dict:
+def control_camera_recording(
+    body: RecordingControl,
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
+    directory.require_ptz(cameraId)
     service = get_camera_stream_service()
     if body.action == "start":
         state = service.status()
@@ -130,12 +199,23 @@ def control_camera_recording(body: RecordingControl, request: Request) -> dict:
 
 
 @router.get("/cam/recordings/{name}", tags=["system"])
-def download_camera_recording(name: str) -> FileResponse:
+def download_camera_recording(
+    name: str,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> FileResponse:
+    directory.require_ptz(cameraId)
     path = get_camera_stream_service().recorder.file(name)
     return FileResponse(path, media_type="video/x-matroska", filename=path.name)
 
 
 @router.delete("/cam/recordings/{name}", tags=["system"])
-def delete_camera_recording(name: str, request: Request) -> dict:
+def delete_camera_recording(
+    name: str,
+    request: Request,
+    cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
+    directory: CameraDirectoryService = Depends(get_camera_directory),
+) -> dict:
+    directory.require_ptz(cameraId)
     get_camera_stream_service().recorder.file(name).unlink()
     return ok({"deleted": name}, trace_of(request))

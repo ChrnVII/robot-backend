@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping, Optional
 
 
 
+from app.common.cameras import validate_cameras
 from app.common.deployment import (
     ConfigurationError, expand_environment as _expand_environment,
     load_platform_values, validate_deployment,
@@ -103,4 +104,5 @@ def load_config(path: Optional[str] = None) -> PlatformConfig:
     if min_size < 1 or max_size < min_size or timeout <= 0:
         raise ConfigurationError("storage.pool must satisfy 1 <= min_size <= max_size and timeout_seconds > 0")
     validate_deployment(value, os.environ)
+    validate_cameras(value)
     return PlatformConfig(source=source, values=value)

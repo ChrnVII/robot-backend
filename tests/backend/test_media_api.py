@@ -30,7 +30,7 @@ def test_device_media_type_mismatch(client):
     assert response.status_code == 400
     body = response.json()
     assert body["code"] == "VALIDATION_ERROR"
-    assert "do not match" in body["message"]
+    assert "不匹配" in body["message"]
 
 
 def test_capture_validation(client):

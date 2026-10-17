@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.endpoints import (
     auth,
+    cameras,
     control,
     inspection,
     media,
@@ -25,6 +26,7 @@ api_router.include_router(auth.router, tags=["auth"])
 
 protected = APIRouter()
 protected.include_router(system.router, tags=["system"])
+protected.include_router(cameras.router, tags=["cameras"])
 protected.include_router(robot.router, tags=["robot"])
 protected.include_router(control.router, tags=["control"])
 protected.include_router(media.router, tags=["media"])

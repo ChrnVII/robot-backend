@@ -61,7 +61,9 @@ class Settings(BaseSettings):
     camera_stream_timeout_us: int = 5_000_000  # RTSP 超时（微秒）
     camera_stream_client_queue: int = 8  # 每个浏览器订阅者的帧队列上限
     camera_stream_reconnect_delay: float = 2.0
-    camera_recordings_dir: str = "data/camera-recordings"
+    # 球形摄像头录像落盘目录（相对后端启动目录，Path.resolve() 后为绝对路径）。
+    # 前端「打开文件夹」直接打开这个目录，不提供修改入口。
+    camera_recordings_dir: str = "data/dome-cam/recordings"
     camera_recordings_queue: int = 600
 
     # 实时检测叠加（可选，只推给前端，不落库 —— 留档仍走 inference-worker）

@@ -16,6 +16,7 @@ from app.common.clock import utc_now_iso
 from app.common.config import Settings
 from app.common.exceptions import ValidationFailed
 from app.db import crud
+from app.services.paging import filter_rows, paginate, parse_enabled, sort_rows
 
 _DEFAULT_LIFT: dict[str, Any] = {
     "height": 0, "faultCode": 0, "enabled": False, "motion": "idle",
@@ -53,8 +54,25 @@ class WorkbenchService:
 
     # ---------- tasks ----------
 
-    def list_tasks(self) -> list[dict[str, Any]]:
-        return crud.workbench.list_tasks(self._session)
+    def list_tasks(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        keyword: str = "",
+        enabled: Any = None,
+    ) -> Any:
+        """任务列表：支持服务端关键词（名称 / ID）与发布状态筛选、分页。
+
+        ``page`` 缺省时返回数组，保持旧契约；显式分页时返回 {rows,total,page,pageSize}。
+        """
+        rows = sort_rows(crud.workbench.list_tasks(self._session), "createdAt")
+        wanted = parse_enabled(enabled)
+        if wanted is not None:
+            # enabled 缺省视为开启，与前端 `row.enabled !== false` 的判定保持一致。
+            rows = [row for row in rows if (row.get("enabled") is not False) is wanted]
+        rows = filter_rows(rows, keyword=keyword, fields=("taskName", "taskId"))
+        return paginate(rows, page, page_size)
 
     def save_task(self, body: dict[str, Any] | None) -> dict[str, Any]:
         now = utc_now_iso()
@@ -97,8 +115,23 @@ class WorkbenchService:
 
     # ---------- runs ----------
 
-    def list_runs(self) -> list[dict[str, Any]]:
-        return crud.workbench.list_runs(self._session)
+    def list_runs(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        keyword: str = "",
+        status: Any = None,
+    ) -> Any:
+        """运行记录：按开始时间倒序，支持执行 ID / 任务 ID 搜索与状态筛选。"""
+        rows = sort_rows(crud.workbench.list_runs(self._session), "startTime")
+        rows = filter_rows(
+            rows,
+            keyword=keyword,
+            fields=("taskRunId", "taskId"),
+            equals={"status": status},
+        )
+        return paginate(rows, page, page_size)
 
     def resume_run(self, run_id: str, body: dict[str, Any] | None) -> dict[str, Any]:
         now = utc_now_iso()
@@ -150,8 +183,27 @@ class WorkbenchService:
 
     # ---------- alerts ----------
 
-    def list_alerts(self) -> list[dict[str, Any]]:
-        return crud.workbench.list_alerts(self._session)
+    def list_alerts(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        keyword: str = "",
+        level: Any = None,
+        status: Any = None,
+    ) -> Any:
+        """告警列表：按产生时间倒序，支持内容 / 告警 ID / 执行 ID 搜索与等级、状态筛选。
+
+        侧栏未读角标用 ``page_size=1`` 只取 total，避免为拿一个数字拉全表。
+        """
+        rows = sort_rows(crud.workbench.list_alerts(self._session), "createdAt")
+        rows = filter_rows(
+            rows,
+            keyword=keyword,
+            fields=("content", "alertId", "taskRunId"),
+            equals={"level": level, "status": status},
+        )
+        return paginate(rows, page, page_size)
 
     def create_alert(self, level: str, message: str, source: str) -> dict[str, Any]:
         now = utc_now_iso()

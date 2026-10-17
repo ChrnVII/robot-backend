@@ -83,4 +83,9 @@ def validate_backend_deployment(settings) -> None:
         overrides = dict(os.environ)
         overrides.update(ROBOT_ROBOT_ID=settings.robot_id, ROBOT_MODE=settings.mode,
                          ROBOT_DATABASE_URL=settings.database_url)
-        validate_deployment(load_platform_values(Path(settings.platform_config)), overrides)
+        values = load_platform_values(Path(settings.platform_config))
+        validate_deployment(values, overrides)
+        # 延迟导入：app.common.cameras 依赖本模块的 ConfigurationError
+        from app.common.cameras import validate_cameras
+
+        validate_cameras(values)

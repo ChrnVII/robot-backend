@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from app.common.cameras import ptz_camera_id
 from app.robot_core.common import new_id
 from app.robot_core.common.config import PlatformConfig, load_config
 from app.robot_core.contracts import InferenceRequest
@@ -64,7 +65,8 @@ def _camera_config(
                 values[camera_id] = item
     if not values and isinstance(devices.get("camera"), Mapping):
         item = dict(devices["camera"])
-        values[str(item.get("camera_id", "cam01"))] = item
+        # 编号与相机目录共用同一兜底，避免两处各写一份（旧代码 str(None) 会得到 "None"）
+        values[ptz_camera_id(config.values)] = item
     if mode not in {"single", "four", "eight", "custom"}:
         raise ValueError("mode must be single, four, eight, or custom")
     count = {"single": 1, "four": 4, "eight": 8}.get(mode, 0)

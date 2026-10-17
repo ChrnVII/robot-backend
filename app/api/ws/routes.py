@@ -25,9 +25,10 @@ import re
 
 from fastapi import APIRouter, Depends, Query, WebSocket
 
-from app.api.deps import get_inspection_service, get_robot_service
+from app.api.deps import get_camera_directory, get_inspection_service, get_robot_service
 from app.api.ws.hub import close_quietly, get_push_hub
 from app.common.config import get_settings
+from app.common.exceptions import ValidationFailed
 from app.security.auth import UnauthorizedError, decode_token
 from app.services.inspection import InspectionService
 from app.services.robot import RobotService
@@ -152,6 +153,7 @@ async def video_socket(
 async def camera_preview_socket(
     websocket: WebSocket,
     accessToken: str | None = Query(default=None),
+    cameraId: str | None = Query(default=None),
 ) -> None:
     """球形摄像头低延迟实时画面（二进制通道）。
 
@@ -163,6 +165,17 @@ async def camera_preview_socket(
     if not await _authorize(websocket, accessToken):
         return
     await websocket.accept()
+
+    try:
+        get_camera_directory().require_ptz(cameraId)
+    except ValidationFailed as error:
+        await websocket.send_json({
+            "t": "error",
+            "code": "unknown_camera",
+            "message": str(error),
+        })
+        await close_quietly(websocket, 1008)
+        return
 
     broadcaster = get_camera_stream_service().broadcaster
     if broadcaster is None:

@@ -156,6 +156,11 @@ DSN：后端 `ROBOT_DATABASE_URL`；控制、感知、同步分别支持
 
 systemd（三进程 target，同步可选）方案见 [`deploy/README.md`](deploy/README.md)。
 
+### 前后端同机部署（要求）
+
+**本后端应与前端（`frontend/`，Vue 工作台）部署在同一台主机上。** 
+
+
 ## 边界与后续
 
 - 旧工程的 robot-api 过渡进程与 Flask legacy 兼容层不在本仓库范围（对外 API 由本后端承担）；
@@ -181,19 +186,36 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 
 ### 球形摄像头实时预览与录像
 
-后端 web 进程使用一路 RTSP，同时向浏览器推送 Annex-B 码流，并按需原样转封装为 MKV；不重编码。此次只实现预览与录像，既有实时检测配置默认关闭。原有云台、预置点和抓图接口继续独立工作。
+后端 web 进程使用一路 RTSP，同时向浏览器推送 Annex-B 码流，并按需原样转封装为 MKV；不重编码。此次只实现预览与录像，既有实时检测配置默认关闭。原有云台与预置点接口继续独立工作。
 
 在 `robot.env` 配置 `ROBOT_CAMERA_STREAM_URL=rtsp://<user>:<encoded-password>@<host>:554/Streaming/Channels/102`，建议子码流使用 H.264。浏览器低延迟预览需要 Chrome / Edge，并通过 HTTPS 或 localhost 访问；不具备解码条件时显示已鉴权的 JPEG 快照预览。
 
 录像在页面手动开始/停止，保存到 `ROBOT_CAMERA_RECORDINGS_DIR`（默认 `data/camera-recordings`，相对于后端工作目录）。起录等待关键帧，停止时排空队列并关闭容器；离开页面仍继续录制。RTSP 断线时结束当前文件，重连后从关键帧另开文件。写盘错误或队列积压时停止录像并报告错误，避免静默丢失参考帧。
 
 接口（沿用 `/api/v1` 统一鉴权）：
+- `GET /api/v1/cameras`：相机目录（见下节），前端据此渲染通道。
 - `GET /api/v1/cam/stream/status`：连接诊断及 `recording` 状态。
 - `GET /api/v1/cam/recordings`：文件列表，`active` 标识正在写入的文件。
 - `POST /api/v1/cam/recordings`：`{"action":"start"}` 或 `{"action":"stop"}`。
 - `GET /api/v1/cam/recordings/{name}`：下载已收尾的 MKV。
 - `DELETE /api/v1/cam/recordings/{name}`：删除已收尾的 MKV。
+- 以上 `/cam/*` 接口均接受可选 `cameraId`（缺省为球形摄像头），非球形或未配置的编号返回可读错误。
 
 正在写入的文件禁止下载和删除。文件持续录制到手动停止或连接中断，请按需维护录像目录的可用空间。
 
 无实机回归：`uv run pytest tests/backend/test_camera_stream.py tests/backend/test_camera_recording.py`。测试通过本地生成的 H.264 编码数据验证 MKV 落盘、解码回读和时间间隔，并覆盖启停、断线分段、写盘异常和文件接口；摄像头实机延迟与兼容性仍需现场验收。
+
+### 相机编号与相机目录
+
+一套相机在三层各有名字，这里统一为**相机编号（cameraId）**：
+
+| 层 | 球形摄像头 | 多路抓图相机 |
+| --- | --- | --- |
+| robot-core 控制设备（`deviceId`） | `camera` | 不参与（不可控制） |
+| sensor-worker 采集 provider | `camera` | `cam01`…`cam08` |
+| 相机编号（`cameraId`） | `devices.camera.camera_id`（示例 `VAR-1`，缺省 `cam01`） | `devices.cameras.items[].id` |
+
+- `GET /api/v1/cameras` 返回 `{source, cameras:[{id, deviceId, kind: ptz|inspection, label, enabled, host}]}`，`source` 为 `settings` 表示没有读平台 YAML（开发态），此时只有球形一条；
+- 配置加载期校验编号**非空、唯一、字符集合规**（`[A-Za-z0-9._-]{1,64}`）。重复编号会让 sensor-worker 的 provider 字典静默覆盖成一路，因此直接以 `ConfigurationError` 启动失败；
+- `POST /api/v1/media/captures` 的 `deviceId` 语义为相机编号：可传 `camera`（球形设备名，兼容旧调用）、球形编号 `VAR-1`、多路编号 `cam01`…；服务端统一映射到 provider key。未知或已禁用的编号返回中文可读错误；
+- 巡检 / 视频流启动时按目录校验 `cameraIds`，未配置的编号、`mode=eight` 但已启用相机不足 8 路都会在 API 层给出中文提示（未配置平台 YAML 时不做此校验，交给 inspection-worker 兜底）。
