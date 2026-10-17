@@ -41,7 +41,6 @@ inspection:
   queue_size: 2
   batch_size: 1
   capture_fps: 3
-  output_root: ../data/inspection
 storage:
   # 本地开发：指向本机 PostgreSQL 实例（生产见 hardware.yaml）。
   # ROBOT_DB_PASSWORD 通过环境变量注入；未设置时使用本地默认密码。

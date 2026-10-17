@@ -124,6 +124,7 @@ def build_camera_reader(camera: Mapping[str, Any]) -> Any:
         auth = f"{user}:{password}@" if user else ""
         stream = int(camera.get("stream", 101))
         channel = stream if stream in (101, 102, 103) else 101
-        url = f"rtsp://{auth}{host}:{port}/Streaming/Channels/{channel}"
+        path = camera.get("path") or f"/Streaming/Channels/{channel}"
+        url = f"rtsp://{auth}{host}:{port}{path}"
         return OpenCVStreamReader(url, width=width, height=height)
     raise ValueError(f"unsupported camera transport: {transport}")

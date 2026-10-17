@@ -14,7 +14,7 @@
     "api": {"type": "object"},
     "safety": {"type": "object"},
     "sync": {"type": "object"},
-    "inspection": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["single", "four", "eight"]}, "queue_size": {"type": "integer", "minimum": 1}, "batch_size": {"type": "integer", "minimum": 1}, "capture_fps": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}, "output_root": {"type": "string"}}},
+    "inspection": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["single", "four", "eight"]}, "queue_size": {"type": "integer", "minimum": 1}, "batch_size": {"type": "integer", "minimum": 1}, "capture_fps": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}}},
     "models": {"type": "object"},
     "legacy_compat": {"type": "object"}
   },

@@ -42,7 +42,6 @@ inspection:
   queue_size: 2
   batch_size: 1
   capture_fps: 3
-  output_root: ../data/inspection
 storage:
   backend: postgresql
   # Local PostgreSQL; deployments provide ROBOT_DB_PASSWORD through the

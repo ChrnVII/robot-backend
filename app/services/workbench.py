@@ -254,7 +254,7 @@ class WorkbenchService:
             "environment": self._settings.mode,
             "modelPath": "models/best.pt",
             "configPath": "configs/inspection.yaml",
-            "resultPath": "results/inspection",
+            "resultPath": "./data/cams",
         }
 
     def save_config(self, values: dict[str, Any] | None) -> dict[str, Any]:

@@ -1,20 +1,4 @@
-"""WebSocket 路由：/ws/state、/ws/environment、/ws/inspections/{taskRunId}、
-/ws/video/{streamId}、/ws/camera/preview。
-
-消息格式与旧 Java 契约一致：{"type": ..., "data": ..., "timestamp": ...}；
-taskRunId / streamId / cameraId 按 [A-Za-z0-9._-]{1,128} 校验（非法时以 1007 关闭）。
-
-v2 改造：
-- 推送经 PushHub 主题广播（同主题客户端共享一次 IPC 调用，替代每客户端轮询）；
-- auth_enabled=true 时校验访问令牌（查询参数 ``accessToken`` 或 Authorization 头），
-  无令牌/令牌非法以 1008 关闭——对齐 REST 的 /api/v1 鉴权要求；
-- 推送失败不再立即断开（见 hub 的连续失败阈值）。
-
-/ws/camera/preview 是**二进制**通道（球形摄像头低延迟预览），与上面按
-``{"type","data","timestamp"}`` 推送 JSON 的主题不是一回事：它先发一条
-``{"t":"config"}`` 文本，之后每帧一个二进制包（9 字节帧头 + Annex-B 载荷），
-断线重连由前端负责。未启用时先发 ``{"t":"error"}`` 再以 1012 关闭。
-"""
+"""Authenticated status channels and binary per-camera preview proxies."""
 
 from __future__ import annotations
 
@@ -23,7 +7,7 @@ import json
 import logging
 import re
 
-from fastapi import APIRouter, Depends, Query, WebSocket
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from app.api.deps import get_camera_directory, get_inspection_service, get_robot_service
 from app.api.ws.hub import close_quietly, get_push_hub
@@ -118,34 +102,9 @@ async def inspection_socket(
         return
 
     async def provider() -> dict:
-        return await inspection.snapshot(task_run_id)
+        return {"status": await inspection.status(task_run_id)}
 
     topic = get_push_hub().topic(f"inspection:{task_run_id}", message_type="inspection", provider=provider)
-    await topic.serve(websocket)
-
-
-@ws_router.websocket("/ws/video/{stream_id}")
-async def video_socket(
-    websocket: WebSocket,
-    stream_id: str,
-    accessToken: str | None = Query(default=None),
-    cameraId: str | None = Query(default=None),
-    inspection: InspectionService = Depends(get_inspection_service),
-) -> None:
-    if not await _authorize(websocket, accessToken):
-        return
-    await websocket.accept()
-    if not _valid(stream_id, _ID) or (cameraId is not None and not _valid(cameraId, _CAMERA_ID)):
-        await close_quietly(websocket, _BAD_DATA)
-        return
-
-    async def provider() -> dict:
-        return {
-            "streamId": stream_id,
-            **await inspection.snapshot(stream_id, camera_id=cameraId, include_detections=False),
-        }
-
-    topic = get_push_hub().topic(f"video:{stream_id}:{cameraId or '*'}", message_type="video", provider=provider)
     await topic.serve(websocket)
 
 
@@ -226,3 +185,49 @@ async def camera_preview_socket(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@ws_router.websocket('/ws/inspections/{task_run_id}/cameras/{camera_id}')
+async def inspection_camera_socket(websocket: WebSocket, task_run_id: str, camera_id: str,
+                                   accessToken: str | None = Query(default=None)):
+    if not await _authorize(websocket, accessToken):
+        return
+    await websocket.accept()
+    if not _valid(task_run_id, _ID) or not _valid(camera_id, _CAMERA_ID):
+        await close_quietly(websocket, _BAD_DATA)
+        return
+    import struct
+    from app.video.inspection_preview import MAX_PACKET
+    writer = receiver = sender = None
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(
+            str(get_settings().inspection_worker_socket) + '.video'), 5)
+        writer.write(json.dumps(dict(task_run_id=task_run_id, camera_id=camera_id)).encode() + b'\n')
+        await writer.drain()
+        async def receive():
+            while (await websocket.receive())['type'] != 'websocket.disconnect':
+                pass
+        async def send():
+            while True:
+                size = struct.unpack('!I', await reader.readexactly(4))[0]
+                if not 1 <= size <= MAX_PACKET:
+                    raise ValueError('invalid preview packet size')
+                packet = await reader.readexactly(size)
+                if packet[:1] == b'T':
+                    await websocket.send_text(packet[1:].decode())
+                else:
+                    await websocket.send_bytes(packet[1:])
+        receiver = asyncio.create_task(receive())
+        sender = asyncio.create_task(send())
+        await asyncio.wait((receiver, sender), return_when=asyncio.FIRST_COMPLETED)
+    except (OSError, ValueError, asyncio.TimeoutError, WebSocketDisconnect):
+        pass
+    finally:
+        tasks = [task for task in (receiver, sender) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await close_quietly(websocket, _SERVICE_RESTARTED)

@@ -84,7 +84,7 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   `VALIDATION_ERROR/INVALID_JSON→400`、`INTERNAL_ERROR→500`；
 - 工作台接口返回自由 JSON：`/tasks`、`/task-templates`、`/runs`、`/alerts`、
   `/config?configType=`、`/map/stations`、`/cam/presets`、`/lift/state`（数据持久化于 PostgreSQL）；
-- WebSocket：`/ws/state`、`/ws/environment`、`/ws/inspections/{taskRunId}`、`/ws/video/{streamId}?cameraId=`，
+- WebSocket：`/ws/state`、`/ws/environment`、`/ws/inspections/{taskRunId}`，
   消息 `{"type","data","timestamp"}`，非法 ID 以 1007 关闭；鉴权开启时需携带访问令牌
   （查询参数 `accessToken` 或 `Authorization: Bearer`），缺失/非法以 1008 关闭。
 
@@ -107,8 +107,9 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   并有并发上限（64）与请求/响应大小上限。应用关闭时经 `gateway.aclose()` 释放池。
 - **WS 推送中枢**（`api/ws/`）：同一主题共享一次快照 IPC，按 cameraId 隔离视频订阅；
   每个订阅者独立发送，队列只保留最新消息，慢客户端不会拖住其他客户端。
-- **图片**：内部 IPC 传本地 JPEG 引用，API 输出仍为原 Base64 字段；预览每相机保留 16 帧，重启清理旧预览。
-  历史证据原图与结果图保留，未自动删除；运维需监控磁盘并归档历史任务。
+- **巡检视频**：每路一条 RTSP 连接，原始码流分别送浏览器与 MKV，解码帧用最新槽位送推理。
+  inspection-worker.sock.video 为私有二进制 IPC，API 鉴权后代理到 /ws/inspections/{taskRunId}/cameras/{cameraId}。
+  已移除旧 JPEG/Base64 预览、逐帧证据图片和 JSONL 输出；历史磁盘文件不会自动删除。
 - **事件驱动**：控制与感知进程在设备状态采样、命令完成、逐帧推理落库时于事务内
   `NOTIFY robot_events`（见 `storage/database.py`），后端 `PgEventListener`
   LISTEN 后唤醒对应主题立即刷新（带防抖与最小刷新间隔）；500ms 周期作为兜底，
@@ -219,3 +220,27 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 - 配置加载期校验编号**非空、唯一、字符集合规**（`[A-Za-z0-9._-]{1,64}`）。重复编号会让 sensor-worker 的 provider 字典静默覆盖成一路，因此直接以 `ConfigurationError` 启动失败；
 - `POST /api/v1/media/captures` 的 `deviceId` 语义为相机编号：可传 `camera`（球形设备名，兼容旧调用）、球形编号 `VAR-1`、多路编号 `cam01`…；服务端统一映射到 provider key。未知或已禁用的编号返回中文可读错误；
 - 巡检 / 视频流启动时按目录校验 `cameraIds`，未配置的编号、`mode=eight` 但已启用相机不足 8 路都会在 API 层给出中文提示（未配置平台 YAML 时不做此校验，交给 inspection-worker 兜底）。
+
+
+## 多路实时检测与任务文件夹
+
+检测页面填写任务名并选择 1–8 路摄像头；停止任务时等待录像和 JSON 写盘完成。
+硬件配置中 cam01–cam08 对应 192.168.136.11–14、192.168.136.21–24，RTSP 地址为
+rtsp://用户:密码@IP:554/avstream/channel=1/stream=0.sdp。
+账号可由 INSPECTION_CAMERA_USERNAME / INSPECTION_CAMERA_PASSWORD 覆盖。
+
+结果根目录固定为后端项目的 data/cams，不接受前端提供路径。每次任务创建
+YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字符替换为下划线）：
+
+- video.mkv：原始视频转封装，每个摄像头一条独立视频轨道，轨道 title 为 cameraId。多轨 MKV 需在播放器选择轨道。
+- inspection.json：metadata 和完整 records；每条记录包含 camera_id、src_pts、video_pts（毫秒）、session、检测框及模型信息。
+  metadata.tracks 给出 cameraId 到实际 MKV 轨道索引的对应关系。
+
+JSON 每 5 秒原子更新，队列有界且不截断记录；正常结束后清除用于恢复快照的临时日志。
+断线后等待关键帧并在统一时间轴继续录像。编码参数变化、摄像头启动超时、写盘积压或推理失败会把任务标记为失败。
+所选相机需全部成功启动；页面会显示失败原因。
+
+“打开检测结果”在前端显示任务文件夹，列出这两个文件并提供下载与复制路径。运行中的 MKV 不可下载，JSON 可下载最近一次完整快照。
+此视图供远程浏览器查看，不会尝试在机器人上启动资源管理器。WebCodecs 预览需要 HTTPS 或 localhost。
+
+旧 JPEG 图片和 /ws/video 预览协议已移除；/ws/inspections/{taskRunId} 只推任务状态。恢复检查点单独位于 data/inspection-state，前后端与 inspection-worker 需一起部署。

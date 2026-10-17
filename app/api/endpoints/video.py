@@ -1,7 +1,4 @@
-"""视频透传域：/video/streams（不推理的连续 JPEG 流，配套 ws/video）。
-
-迁移来源：VideoStreamController.java；streamId 同时是 inspection-worker 的任务标识。
-"""
+"""Video-only tasks preview via /ws/inspections/{id}/cameras/{camera}."""
 
 from __future__ import annotations
 

@@ -44,10 +44,6 @@ class Op:
     TASK_STOP = "stop"
     TASK_STATUS = "status"
     TASK_DETECTIONS = "detections"
-    TASK_LATEST_FRAME = "latest_frame"
-    TASK_LATEST_FRAMES = "latest_frames"
-    TASK_RESOLVE_IMAGE = "resolve_image"
-    TASK_SNAPSHOT = "snapshot"
 
 
 class Channels:
@@ -202,8 +198,7 @@ class InspectionRequestWire:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "InspectionRequestWire":
         operation = _require(value, "operation")
-        supported = {Op.TASK_START, Op.TASK_STOP, Op.TASK_STATUS, Op.TASK_DETECTIONS,
-                     Op.TASK_LATEST_FRAME, Op.TASK_LATEST_FRAMES, Op.TASK_SNAPSHOT, Op.TASK_RESOLVE_IMAGE}
+        supported = {Op.TASK_START, Op.TASK_STOP, Op.TASK_STATUS, Op.TASK_DETECTIONS}
         if not isinstance(operation, str) or operation not in supported:
             raise WireError("unsupported inspection operation")
         run_id = value.get("task_run_id")
@@ -214,6 +209,9 @@ class InspectionRequestWire:
         if value.get("camera_id") is not None:
             _identifier(value["camera_id"], "camera_id", 64)
         if operation == Op.TASK_START:
+            name = value.get("task_name", "巡检")
+            if not isinstance(name, str) or not name.strip() or len(name) > 80:
+                raise WireError("task_name must contain 1 to 80 characters")
             mode = value.get("mode", "single")
             if not isinstance(mode, str) or mode not in {"single", "four", "eight", "custom"}:
                 raise WireError("invalid mode")
@@ -234,10 +232,4 @@ class InspectionRequestWire:
             for key, default in (("offset", 0), ("limit", 50)):
                 if type(value.get(key, default)) is not int:
                     raise WireError(f"{key} must be an integer")
-        if operation == Op.TASK_SNAPSHOT and type(value.get("include_detections", True)) is not bool:
-            raise WireError("include_detections must be a boolean")
-        if operation == Op.TASK_RESOLVE_IMAGE:
-            image_id = _require(value, "image_id")
-            if not isinstance(image_id, str) or not image_id:
-                raise WireError("image_id must be a non-empty string")
         return cls(dict(value))

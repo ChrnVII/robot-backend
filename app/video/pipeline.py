@@ -168,7 +168,9 @@ class CameraBroadcaster:
             try:
                 client.queue.put_nowait(json.dumps({"t": "stop", "code": code}))
             except asyncio.QueueFull:
-                pass
+                while not client.queue.empty():
+                    client.queue.get_nowait()
+                client.queue.put_nowait(json.dumps({"t": "stop", "code": code}))
 
     # ---------- 广播 ---------- #
 

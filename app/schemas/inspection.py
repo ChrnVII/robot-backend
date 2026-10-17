@@ -15,6 +15,7 @@ RunId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._-]{1,128}$")]
 class StartInspectionRequest(BaseModel):
     mode: Literal["single", "four", "eight", "custom"] = "single"
     taskRunId: RunId | None = None
+    taskName: str = Field(default="巡检", min_length=1, max_length=80)
     durationSeconds: float = Field(default=0.0, ge=0.0)
     cameraIds: list[CameraId] = Field(default_factory=list, max_length=8)
     pipeline: Literal["inference", "passthrough"] = "inference"

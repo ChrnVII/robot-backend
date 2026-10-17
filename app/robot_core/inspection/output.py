@@ -1,80 +1,84 @@
+"""Bounded asynchronous JSON journal with atomic, complete snapshots."""
 from __future__ import annotations
-
 import json
 import os
-import tempfile
-from datetime import datetime, timezone
+import queue
+import threading
+import time
 from pathlib import Path
-from typing import Any, Mapping
-
-from app.robot_core.common import freeze_directory, MANIFEST_NAME
 
 
 class InspectionOutput:
-    """Persists positive evidence images and one structured JSONL event per result."""
-
-    def __init__(self, root: str | Path, task_run_id: str):
-        self.root = Path(root).expanduser().resolve() / task_run_id
+    def __init__(self, directory, metadata):
+        self.root = Path(directory)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.root / "inspection.jsonl"
+        self.path = self.root / 'inspection.json'
+        self.journal = self.root / '.inspection.records'
+        self.metadata = dict(metadata)
+        self.error = ''
+        self._queue = queue.Queue(maxsize=1024)
+        self._thread = threading.Thread(target=self._run, name='inspection-json', daemon=True)
+        self._snapshot()
+        self._thread.start()
 
-    def write(self, packet: Any, result: Mapping[str, Any], annotated: Any = None, *, persist_all: bool = False) -> dict[str, str] | None:
-        if (self.root / MANIFEST_NAME).exists():
-            raise RuntimeError(f"inspection output is frozen: {self.root}")
-        detections = list(result.get("detections", []))
-        event = {
-            "event_type": "detection" if detections else "inference",
-            "task_run_id": packet.task_run_id,
-            "camera_id": packet.camera_id,
-            "frame_id": packet.frame_id,
-            "captured_at": datetime.fromtimestamp(packet.captured_at, timezone.utc).isoformat(),
-            "detections": detections,
-            "count_by_label": dict(result.get("count_by_label", {})),
-            "latency_ms": result.get("latency_ms"),
-            "status": result.get("status"),
-            "trace_id": result.get("trace_id"),
-            "model_id": result.get("model_id"),
-            "model_version": result.get("model_version"),
-            "model_sha256": result.get("model_sha256"),
-            "result_schema": result.get("result_schema"),
-        }
-        paths: dict[str, str] | None = None
-        if (persist_all or detections) and annotated is not None:
-            camera_dir = self.root / packet.camera_id
-            camera_dir.mkdir(parents=True, exist_ok=True)
-            stem = f"{packet.frame_id:08d}"
-            original = camera_dir / f"{stem}_original.jpg"
-            result_path = camera_dir / f"{stem}_result.jpg"
-            self._write_image(original, packet.image)
-            self._write_image(result_path, annotated)
-            paths = {"original_image": str(original), "result_image": str(result_path)}
-            event.update(paths)
-        with self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-        return paths
-
-    def freeze(self) -> Path:
-        return freeze_directory(
-            self.root, kind="inspection_run", identifier=self.root.name, version="1",
-            exclude_names={"summary.json", "status.json"},
-        )
-
-    @staticmethod
-    def _write_image(path: Path, image: Any) -> None:
+    def add(self, record):
+        if self.error:
+            raise RuntimeError(self.error)
         try:
-            import cv2
-        except ImportError as error:
-            raise RuntimeError("opencv-python is required to save inspection evidence") from error
-        ok, encoded = cv2.imencode(".jpg", image)
-        if not ok:
-            raise RuntimeError(f"failed to encode inspection image: {path}")
-        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
-        temporary = Path(temporary_name)
+            self._queue.put_nowait(record)
+        except queue.Full as exc:
+            raise RuntimeError('检测记录写盘积压，任务已停止') from exc
+
+    def _snapshot(self):
+        temporary = self.path.with_suffix('.json.tmp')
+        with temporary.open('w', encoding='utf-8') as out:
+            out.write('{"metadata":')
+            json.dump(self.metadata, out, ensure_ascii=False)
+            out.write(',"records":[')
+            if self.journal.exists():
+                with self.journal.open(encoding='utf-8') as source:
+                    first = True
+                    for line in source:
+                        if not first:
+                            out.write(',')
+                        out.write(line.strip())
+                        first = False
+            out.write(']}')
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, self.path)
+
+    def _run(self):
+        last = time.monotonic()
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(bytes(encoded))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+            with self.journal.open('a', encoding='utf-8') as journal:
+                while True:
+                    try:
+                        record = self._queue.get(timeout=1)
+                    except queue.Empty:
+                        record = {}
+                    if isinstance(record, tuple):
+                        self.metadata.update(record[0])
+                        journal.flush()
+                        self._snapshot()
+                        break
+                    if record:
+                        journal.write(json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n')
+                    if time.monotonic() - last >= 5:
+                        journal.flush()
+                        self._snapshot()
+                        last = time.monotonic()
+            self.journal.unlink(missing_ok=True)
+        except Exception as exc:
+            self.error = f'检测记录写盘失败：{exc}'
+
+    def close(self, metadata):
+        while self._thread.is_alive():
+            try:
+                self._queue.put((dict(metadata),), timeout=.2)
+                break
+            except queue.Full:
+                continue
+        self._thread.join()
+        if self.error:
+            raise RuntimeError(self.error)

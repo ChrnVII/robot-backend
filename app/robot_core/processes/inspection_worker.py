@@ -9,7 +9,7 @@ from app.ipc import JsonSocketServer
 from app.robot_core.storage import PlatformStore
 from app.robot_core.storage.runs import InspectionRunStore
 from app.robot_core.sensing.camera_pool import CameraPool
-from app.robot_core.inspection.preview import PreviewFrames
+from app.video.inspection_preview import InspectionPreview
 from app.robot_core.inference import InferenceRuntime, build_configured_adapters
 
 from .common import check_output, configure_logging, parser, run
@@ -26,7 +26,7 @@ class PerceptionWorker:
                                    initialize=initialize)
         self.cameras = CameraPool(simulated=config.values["runtime"]["mode"] == "simulated")
         self.runtime = None
-        self.preview = PreviewFrames(config.path("storage", "media_root").parent / "preview")
+        self.preview = InspectionPreview()
         self.sensor = build_service(config, self.store, self.cameras)
         self.inspection = InspectionService(config, self._run, InspectionRunStore(self.store))
 
@@ -39,8 +39,7 @@ class PerceptionWorker:
                 runtime.stop()
                 raise
             self.runtime = runtime
-        return run_inspection(config, **kwargs, store=self.store, camera_pool=self.cameras,
-                              inference_runtime=self.runtime, preview=self.preview)
+        return run_inspection(config, **kwargs, inference_runtime=self.runtime, preview=self.preview)
 
     def close(self):
         self.inspection.close()
@@ -55,13 +54,6 @@ async def handle_inspection_request(service: InspectionService, request: dict) -
     if operation == Op.HEALTH:
         return service.health()
     request = InspectionRequestWire.from_mapping(request).to_payload()
-    if operation == Op.TASK_LATEST_FRAME:
-        return service.latest_frame(
-            str(request["task_run_id"]),
-            str(request["camera_id"]) if request.get("camera_id") else None,
-        )
-    if operation == Op.TASK_LATEST_FRAMES:
-        return service.latest_frames(str(request["task_run_id"]))
     if operation == Op.TASK_START:
         return await asyncio.to_thread(service.start, request)
     if operation == Op.TASK_STOP:
@@ -69,17 +61,12 @@ async def handle_inspection_request(service: InspectionService, request: dict) -
     if operation == Op.TASK_STATUS:
         task_run_id = request.get("task_run_id")
         return await asyncio.to_thread(service.status, str(task_run_id) if task_run_id else None)
-    if operation == Op.TASK_SNAPSHOT:
-        return await asyncio.to_thread(service.snapshot, str(request["task_run_id"]),
-            camera_id=request.get("camera_id"), include_detections=bool(request.get("include_detections", True)))
     if operation == Op.TASK_DETECTIONS:
         return await asyncio.to_thread(service.detections,
             str(request["task_run_id"]),
             offset=int(request.get("offset", 0)),
             limit=int(request.get("limit", 50)),
         )
-    if operation == Op.TASK_RESOLVE_IMAGE:
-        return service.resolve_image(str(request["task_run_id"]), str(request["image_id"]))
     raise ValueError("unsupported operation")
 
 
@@ -111,13 +98,14 @@ def main() -> None:
             # recovery finishes, so a reconnect cannot race task reconciliation.
             await inspection_server.start(start_serving=False)
             await sensor_server.start(start_serving=False)
-            await asyncio.to_thread(worker.preview.recover)
+            await worker.preview.start(config.path("ipc", "inspection_worker"))
             await asyncio.to_thread(service.recover)
             await asyncio.gather(inspection_server.serve_forever(), sensor_server.serve_forever())
         finally:
             await inspection_server.close()
             await sensor_server.close()
             await asyncio.to_thread(worker.close)
+            await worker.preview.close()
 
     run(serve)
 

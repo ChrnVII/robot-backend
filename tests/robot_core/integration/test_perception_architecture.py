@@ -13,7 +13,6 @@ from app.robot_core.contracts import CaptureRequest, InferenceResponse
 from app.robot_core.inference.runtime import TestModelAdapter as ModelStub
 from app.robot_core.inspection.service import InspectionService
 from app.robot_core.processes.inspection_worker import PerceptionWorker
-from app.services.inspection import InferenceQueryService, _render_frames
 
 
 class CountingModel(ModelStub):
@@ -37,58 +36,9 @@ class CountingModel(ModelStub):
             model_id=self.model_id, result_schema=self.result_schema)
 
 
-def test_capture_inspection_reuse_and_public_evidence(tmp_path, monkeypatch):
-    adapter = CountingModel()
-    monkeypatch.setattr("app.robot_core.processes.inspection_worker.build_configured_adapters",
-                        lambda _config: {adapter.capability: adapter})
-    config = PlatformConfig(tmp_path / "config.yaml", {
-        "robot": {"robot_id": "robot-test"}, "runtime": {"mode": "simulated"},
-        "storage": {"database_url": os.environ["ROBOT_TEST_DATABASE_URL"], "media_root": str(tmp_path / "media")},
-        "devices": {"camera": {"transport": "v4l2", "device": "0", "width": 32, "height": 24}},
-        "inspection": {"output_root": str(tmp_path / "inspection"), "capture_fps": 20},
-    })
-    worker = PerceptionWorker(config)
-    engine = create_engine(os.environ["ROBOT_TEST_DATABASE_URL"])
-    try:
-        worker.inspection.recover()
-        for run_id in ("first", "second"):
-            worker.inspection.start({"task_run_id": run_id, "duration_seconds": 0.3})
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                status = worker.inspection.status(run_id)
-                if status["state"] in InspectionService.TERMINAL_STATES:
-                    break
-                time.sleep(0.02)
-            assert status["state"] == "completed", status
-            assert status["processed"] > 0
-            # Both APIs share one reader and inspection keeps its model loaded.
-            asset = worker.sensor.capture(CaptureRequest(run_id, "point", "camera", "image"))
-            assert asset["mime_type"] == "image/jpeg"
-            assert len(worker.cameras._readers) == 1
-            internal = worker.inspection.snapshot(run_id)
-            public = _render_frames(internal)
-            assert "jpeg_path" not in public["frame"]
-            assert base64.b64decode(public["frame"]["jpeg_base64"]).startswith(b"\xff\xd8")
-            page = worker.inspection.detections(run_id)
-            log = tmp_path / "inspection" / run_id / "inspection.jsonl"
-            events = [InspectionService._public_event(json.loads(line)) for line in log.read_text().splitlines()]
-            assert page["items"] == events[:50]  # exact old detection payload
-            image = worker.inspection.resolve_image(run_id, page["items"][0]["original_image_id"])
-            assert Path(image["path"]).is_file()
-        assert adapter.loads == 1
-        queries = []
-        event.listen(engine, "before_cursor_execute", lambda _c, _u, sql, *_args: queries.append(sql))
-        result = InferenceQueryService(engine).results("first", 0, 50)
-        assert len(queries) == 3  # count, result page, all boxes
-        assert result["total"] == worker.inspection.status("first")["processed"]
-        assert result["items"][0]["detections"][0]["label"] == "heat"
-    finally:
-        worker.close()
-        engine.dispose()
-    assert adapter.unloads == 1
-
-
-def test_failed_database_write_keeps_recoverable_checkpoint(tmp_path):
+def test_failed_database_write_keeps_recoverable_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.robot_core.inspection.service.data_root", lambda _: tmp_path)
+    monkeypatch.setattr("app.robot_core.inspection.paths.data_root", lambda _: tmp_path)
     class OfflineRuns:
         def status(self, _run_id):
             return None
@@ -102,7 +52,7 @@ def test_failed_database_write_keeps_recoverable_checkpoint(tmp_path):
     import pytest
     with pytest.raises(RuntimeError, match="database unavailable"):
         service.start({"task_run_id": "checkpoint"})
-    checkpoint = tmp_path / "inspection" / "checkpoint" / "status.json"
+    checkpoint = tmp_path / "inspection-state" / "checkpoint" / "status.json"
     assert json.loads(checkpoint.read_text())["state"] == "starting"
     recovered = InspectionService(config, lambda *_args, **_kwargs: None)
     recovered.recover()

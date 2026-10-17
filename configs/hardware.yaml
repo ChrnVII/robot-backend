@@ -40,55 +40,71 @@ devices:
     items:
       - id: cam01
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.11
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
         width: 1280
         height: 720
         timeout_seconds: 5
       - id: cam02
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.12
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam03
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.13
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam04
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.14
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam05
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.21
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam06
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.22
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam07
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.23
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam08
         enabled: true
-        transport: http
+        transport: rtsp
         host: 192.168.136.24
-        port: 8080
-        path: /API/picture
+        port: 554
+        path: /avstream/channel=1/stream=0.sdp
+        username: ${INSPECTION_CAMERA_USERNAME:-admin}
+        password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
   audio:
     device: null
     sample_rate: 16000
@@ -105,7 +121,6 @@ inspection:
   batch_size: 8
   capture_fps: 2
   camera_startup_timeout_seconds: 30
-  output_root: ../data/inspection
 storage:
   backend: postgresql
   database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD}@127.0.0.1:5432/robot_platform

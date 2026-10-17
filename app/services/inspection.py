@@ -1,17 +1,8 @@
-"""巡检服务：任务启动/停止/状态、检测分页、证据图片读取。
-
-迁移来源：InspectionApplicationService.java、InferenceQueryService.java。
-- InspectionService：经 inspection-worker 网关（IPC）；
-- InferenceQueryService：通过只读视图查询推理记录，数据库故障使用统一错误封套；
-  复用 app.db.database 的共享 engine，不再自建第二个连接池。
-"""
+"""Inspection worker gateway and historical database result queries."""
 
 from __future__ import annotations
 
 import json
-import base64
-import asyncio
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -28,12 +19,6 @@ from app.gateways.base import camelize
 from app.gateways.inspection_worker import InspectionWorkerGateway
 from app.schemas.inspection import StartInspectionRequest, StartVideoStreamRequest
 from app.services.cameras import CameraDirectoryService
-
-
-@dataclass(frozen=True)
-class ResolvedImage:
-    path: Path
-    content_type: str
 
 
 class InspectionService:
@@ -75,6 +60,7 @@ class InspectionService:
             "operation": Op.TASK_START,
             "mode": request.mode,
             "pipeline": request.pipeline,
+            "task_name": request.taskName,
             "duration_seconds": request.durationSeconds,
         }
         if request.taskRunId is not None:
@@ -108,36 +94,6 @@ class InspectionService:
             "operation": Op.TASK_DETECTIONS, "task_run_id": task_run_id, "offset": offset, "limit": limit,
         }))
 
-    async def latest_frame(self, task_run_id: str, camera_id: str | None = None) -> dict:
-        request: dict[str, Any] = {"operation": Op.TASK_LATEST_FRAME, "task_run_id": task_run_id}
-        if camera_id:
-            request["camera_id"] = camera_id
-        value = await self._call(request)
-        return camelize(await asyncio.to_thread(_render_frames, value))
-
-    async def latest_frames(self, task_run_id: str) -> dict:
-        value = await self._call({"operation": Op.TASK_LATEST_FRAMES, "task_run_id": task_run_id})
-        return camelize(await asyncio.to_thread(_render_frames, value))
-
-    async def snapshot(self, task_run_id: str, *, camera_id: str | None = None,
-                       include_detections: bool = True) -> dict:
-        request = {"operation": Op.TASK_SNAPSHOT, "task_run_id": task_run_id,
-                   "include_detections": include_detections}
-        if camera_id:
-            request["camera_id"] = camera_id
-        value = await self._call(request)
-        return camelize(await asyncio.to_thread(_render_frames, value))
-
-    async def resolve_image(self, task_run_id: str, image_id: str) -> ResolvedImage:
-        value = await self._call({
-            "operation": Op.TASK_RESOLVE_IMAGE, "task_run_id": task_run_id, "image_id": image_id,
-        })
-        return ResolvedImage(
-            path=Path(str(value.get("path"))).absolute(),
-            content_type=str(value.get("content_type", "image/jpeg")),
-        )
-
-
 _RESULT_SQL = text(
     """
     SELECT run_id, request_id, task_run_id, trace_id, capability,
@@ -159,22 +115,6 @@ _DETECTION_SQL = text(
     FROM v_inference_detections WHERE request_id IN :request_ids ORDER BY detection_id
     """
 ).bindparams(bindparam("request_ids", expanding=True))
-
-
-def _render_frames(value: Any, cache: dict[str, str] | None = None) -> Any:
-    """Keep the public Base64 contract while internal IPC transfers small references."""
-    cache = {} if cache is None else cache
-    if isinstance(value, dict):
-        result = {key: _render_frames(item, cache) for key, item in value.items() if key != "jpeg_path"}
-        path = value.get("jpeg_path")
-        if path:
-            if path not in cache:
-                cache[path] = base64.b64encode(Path(path).read_bytes()).decode("ascii")
-            result["jpeg_base64"] = cache[path]
-        return result
-    if isinstance(value, list):
-        return [_render_frames(item, cache) for item in value]
-    return value
 
 
 class InferenceQueryService:

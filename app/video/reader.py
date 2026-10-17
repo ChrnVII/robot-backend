@@ -264,6 +264,7 @@ class RtspStreamReader(threading.Thread):
             )
 
             preview_ready = False
+            packet_times = {}
             try:
                 for packet in container.demux(stream):
                     if self._stop_event.is_set():
@@ -286,6 +287,10 @@ class RtspStreamReader(threading.Thread):
                     # 实时链路的 pts：这一帧的到达时刻（WebSocket 帧头与此同值）
                     pts_ms = self.timeline.now_ms()
                     self.packets_rx += 1
+                    if packet.pts is not None:
+                        packet_times[packet.pts] = pts_ms
+                        if len(packet_times) > 120:
+                            packet_times.pop(next(iter(packet_times)))
 
                     nals = split_annexb(raw)
                     self._absorb(nals)
@@ -325,8 +330,8 @@ class RtspStreamReader(threading.Thread):
                             source_pts = last.pts if last.pts is not None else packet.pts
                             self.slot.put(
                                 last,
-                                pts_ms,
-                                ticks_to_ms(source_pts, in_tb) if source_pts is not None else None,
+                                packet_times.pop(source_pts, pts_ms),
+                                ticks_to_ms(source_pts, last.time_base or in_tb) if source_pts is not None else None,
                             )
             finally:
                 if self.recorder is not None:

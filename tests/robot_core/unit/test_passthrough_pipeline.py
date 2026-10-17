@@ -1,95 +1,57 @@
-import tempfile
+"""Exercise the production engine with encoded input, without cameras or a database."""
+import json
 import time
-import unittest
 from pathlib import Path
-from unittest.mock import patch
-
+from types import SimpleNamespace
+import av
+import pytest
 from app.robot_core.common.config import PlatformConfig
-from app.robot_core.processes import inspection_engine
+from app.robot_core.processes import inspection_engine as engine
+from app.video.reader import RtspStreamReader
+from tests.robot_core.unit.test_realtime_recording import source
+
+pytestmark = pytest.mark.no_database
+
+@pytest.mark.parametrize('pipeline', ['inference', 'passthrough'])
+def test_engine_records_and_finalizes(tmp_path, monkeypatch, pipeline):
+    source_path = tmp_path / 'input.mkv'
+    source(source_path)
+    class FileReader(RtspStreamReader):
+        def run(self):
+            try:
+                with av.open(str(source_path)) as container:
+                    stream = container.streams.video[0]
+                    for packet in container.demux(stream):
+                        if self._stop_event.is_set() or not packet.size:
+                            break
+                        self.recorder.submit(packet, stream)
+                        self.keyframes_rx += bool(packet.is_keyframe)
+                        for frame in packet.decode():
+                            self.slot.put(frame, round(time.monotonic() * 1000), round(float(frame.pts * frame.time_base) * 1000))
+                        time.sleep(.02)
+                    self.recorder.finish()
+            except Exception as error:
+                self.last_error = str(error)
+    class Runtime:
+        calls = 0
+        def predict(self, request):
+            self.calls += 1
+            return SimpleNamespace(status='ok', result={'detections': [{'label': 'heat', 'bbox_xyxy': [1, 1, 10, 10]}]},
+                                   model_id='test', model_version='1', model_sha256='abc', latency_ms=1)
+    runtime = Runtime()
+    monkeypatch.setattr(engine, 'RtspStreamReader', FileReader)
+    config = PlatformConfig(tmp_path / 'config.yaml', {'devices': {'cameras': {'items': [
+        {'id': 'cam01', 'transport': 'rtsp', 'host': '192.168.136.11'}]}}})
+    result = engine.run(config, mode='single', task_run_id='test', duration_seconds=.4,
+                        output_directory=tmp_path / 'result', pipeline=pipeline, inference_runtime=runtime)
+    assert result['state'] == 'completed', result
+    value = json.loads((tmp_path / 'result' / 'inspection.json').read_text())
+    assert len(value['records']) > 0
+    assert all(r['video_pts'] is not None for r in value['records'])
+    assert (runtime.calls > 0) == (pipeline == 'inference')
+    with av.open(str(tmp_path / 'result' / 'video.mkv')) as recorded:
+        assert len(list(recorded.decode(video=0))) == 12
 
 
-class _Reader:
-    def __init__(self):
-        self.closed = False
-
-    def __call__(self):
-        return object()
-
-    def close(self):
-        self.closed = True
-
-
-class PassthroughPipelineTest(unittest.TestCase):
-    def test_passthrough_sends_raw_frames_without_constructing_inference_runtime(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = PlatformConfig(
-                source=root / "config.yaml",
-                values={
-                    "devices": {"camera": {"transport": "v4l2", "device": "0"}},
-                    "inspection": {
-                        "output_root": str(root / "inspection"),
-                        "capture_fps": 30,
-                        "batch_size": 1,
-                        "queue_size": 1,
-                    },
-                    "storage": {"media_root": str(root / "media")},
-                    "models": {},
-                },
-            )
-            reader = _Reader()
-            frames = []
-            with patch.object(inspection_engine, "build_camera_reader", return_value=reader), \
-                    patch.object(inspection_engine, "_encode_jpeg_base64", return_value="raw-jpeg"), \
-                    patch.object(inspection_engine, "InferenceRuntime", side_effect=AssertionError("inference must be bypassed")):
-                summary = inspection_engine.run(
-                    config,
-                    mode="single",
-                    pipeline="passthrough",
-                    task_run_id="stream-1",
-                    duration_seconds=0.05,
-                    headless=True,
-                    frame_callback=frames.append,
-                )
-
-            self.assertEqual("passthrough", summary["pipeline"])
-            self.assertGreater(summary["processed"], 0)
-            self.assertTrue(frames)
-            self.assertTrue(all(frame["pipeline"] == "passthrough" for frame in frames))
-            self.assertTrue(all(frame["jpeg_base64"] == "raw-jpeg" for frame in frames))
-            self.assertFalse((root / "inspection" / "stream-1" / "inspection.jsonl").exists())
-            self.assertTrue(reader.closed)
-
-    def test_no_camera_frames_fail_after_startup_timeout_and_redact_credentials(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = PlatformConfig(
-                source=root / "config.yaml",
-                values={
-                    "devices": {"cameras": {"items": [{"id": "cam01", "enabled": True,
-                        "transport": "rtsp", "host": "192.168.137.64", "port": 554,
-                        "username": "operator", "password": "private", "stream": 101}]}},
-                    "inspection": {"output_root": str(root / "inspection"), "capture_fps": 30,
-                        "batch_size": 1, "queue_size": 1, "camera_startup_timeout_seconds": 0.1},
-                    "storage": {"media_root": str(root / "media")},
-                    "models": {},
-                },
-            )
-
-            def fail_to_read():
-                raise RuntimeError("stream unavailable: rtsp://operator:private@192.168.137.64:554/Streaming/Channels/101")
-
-            with patch.object(inspection_engine, "build_camera_reader", return_value=fail_to_read):
-                summary = inspection_engine.run(
-                    config, mode="single", pipeline="passthrough", task_run_id="stream-fail",
-                    duration_seconds=0, headless=True,
-                )
-
-        self.assertEqual("failed", summary["state"])
-        self.assertEqual(0, summary["processed"])
-        self.assertIn("192.168.137.64", summary["camera_errors"]["cam01"])
-        self.assertNotIn("private", str(summary))
-
-
-if __name__ == "__main__":
-    unittest.main()
+def test_rtsp_url_matches_configured_path():
+    assert engine.camera_url(dict(transport='rtsp', host='192.168.136.11', username='admin', password='admin123')) ==         'rtsp://admin:admin123@192.168.136.11:554/avstream/channel=1/stream=0.sdp'

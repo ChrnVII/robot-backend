@@ -157,7 +157,8 @@ class RtspCameraProvider:
         password = quote(settings.password or "", safe="")
         auth = f"{user}:{password}@" if user else ""
         channel = settings.stream if settings.stream in (101, 102, 103) else 101
-        return f"rtsp://{auth}{settings.host}:{settings.port}/Streaming/Channels/{channel}"
+        path = settings.path if settings.path != "/API/picture" else f"/Streaming/Channels/{channel}"
+        return f"rtsp://{auth}{settings.host}:{settings.port}{path}"
 
     def _load_cv2(self) -> Any:
         if self._cv2 is not None:

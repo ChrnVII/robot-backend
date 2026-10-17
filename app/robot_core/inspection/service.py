@@ -10,7 +10,7 @@ from typing import Any, Callable, Mapping
 from app.robot_core.common import new_id
 from app.robot_core.common.config import PlatformConfig
 from app.robot_core.storage.runs import InspectionRunStore
-from .log_index import DetectionLogIndex
+from .paths import data_root, task_directory
 
 logger = logging.getLogger(__name__)
 
@@ -23,23 +23,15 @@ class InspectionService:
     def __init__(self, config: PlatformConfig, run_function: Callable[..., Any],
                  run_store: InspectionRunStore | None = None) -> None:
         self.config = config
-        settings = config.values.get("inspection", {})
-        configured_root = Path(str(settings.get("output_root", config.values["storage"]["media_root"])))
-        self.output_root = (
-            configured_root if configured_root.is_absolute()
-            else (config.source.parent / configured_root).resolve()
-        )
+        self.output_root = data_root(config) / "inspection-state"
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._run_function = run_function
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
         self._active: dict[str, Any] | None = None
-        self._latest_frame: dict[str, Any] | None = None
-        self._latest_frames: dict[tuple[str, str], dict[str, Any]] = {}
         self._camera_errors: dict[str, dict[str, str]] = {}
         self._run_store = run_store
-        self._log_index = DetectionLogIndex()
         self._last_write = 0.0
         self._persisted_state = None
 
@@ -96,6 +88,9 @@ class InspectionService:
             self._validate_id(camera_id, "camera_id")
         camera_count = len(camera_ids) or int(expected_count or 0)
         duration_seconds = max(0.0, float(request.get("duration_seconds", 0.0)))
+        task_name = str(request.get("task_name") or "巡检").strip()
+        if not task_name or len(task_name) > 80:
+            raise ValueError("task_name must contain 1 to 80 characters")
         pipeline = str(request.get("pipeline", "inference"))
         if pipeline not in self.PIPELINES:
             raise ValueError("pipeline must be inference or passthrough")
@@ -108,11 +103,13 @@ class InspectionService:
                 raise ValueError("task_run_id already exists")
             if self._run_store and self._run_store.status(task_run_id) is not None:
                 raise ValueError("task_run_id already exists")
-            self._latest_frame = None
-            self._latest_frames.clear()
             self._stop_event = threading.Event()
+            output_dir = task_directory(self.config, task_name, task_run_id)
+            output_dir.mkdir(parents=True, exist_ok=False)
             self._active = {
                 "task_run_id": task_run_id,
+                "task_name": task_name,
+                "output_dir": str(output_dir),
                 "mode": mode,
                 "pipeline": pipeline,
                 "state": "starting",
@@ -177,76 +174,13 @@ class InspectionService:
         self._validate_id(task_run_id, "task_run_id")
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
-        if self._run_store is not None and self._run_store.status(task_run_id) is not None:
-            result = self._run_store.detections(task_run_id, offset, limit)
-            if result["total"] or not (self.output_root / task_run_id / "inspection.jsonl").is_file():
-                return result
-        log_path = self.output_root / task_run_id / "inspection.jsonl"
-        items: list[dict[str, Any]] = []
-        total = 0
-        if log_path.is_file():
-            with self._lock:
-                events, total = self._log_index.page(log_path, offset, limit)
-            items = [self._public_event(event) for event in events]
-        elif not (self.output_root / task_run_id).is_dir():
-            raise KeyError("inspection task not found")
-        return {"items": items, "offset": offset, "limit": limit, "total": total}
+        status = self.status(task_run_id)
+        path = Path(status["output_dir"]) / "inspection.json"
+        records = json.loads(path.read_text(encoding="utf-8")).get("records", []) if path.exists() else []
+        return {"items": records[offset:offset + limit], "offset": offset, "limit": limit, "total": len(records)}
 
-    def resolve_image(self, task_run_id: str, image_id: str) -> dict[str, Any]:
-        self._validate_id(task_run_id, "task_run_id")
-        parts = image_id.split(":", 1)
-        if len(parts) != 2 or any(not part or part in {".", ".."} for part in parts):
-            raise ValueError("invalid image_id")
-        if any(
-            len(part) > limit
-            or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in part)
-            for part, limit in zip(parts, (128, 160))
-        ):
-            raise ValueError("invalid image_id")
-        if not image_id.lower().endswith(".jpg"):
-            raise ValueError("only JPEG evidence images are supported")
-        task_root = (self.output_root / task_run_id).resolve()
-        image_path = (task_root / parts[0] / parts[1]).resolve()
-        if task_root not in image_path.parents or not image_path.is_file():
-            raise FileNotFoundError("inspection image not found")
-        return {"path": str(image_path), "content_type": "image/jpeg"}
-
-    def health(self) -> dict[str, Any]:
+    def health(self):
         return {"state": "ok", "active": self.status()}
-
-    def snapshot(self, task_run_id: str, *, camera_id: str | None = None,
-                 include_detections: bool = True) -> dict:
-        result = {"status": self.status(task_run_id), "frame": self.latest_frame(task_run_id, camera_id)}
-        if include_detections:
-            result["detections"] = self.detections(task_run_id, offset=0, limit=20)
-            result["frames"] = self.latest_frames(task_run_id)
-        return result
-
-    def latest_frame(self, task_run_id: str, camera_id: str | None = None) -> dict[str, Any]:
-        self._validate_id(task_run_id, "task_run_id")
-        with self._lock:
-            if camera_id is not None:
-                self._validate_id(camera_id, "camera_id")
-                frame = dict(self._latest_frames.get((task_run_id, camera_id), {}))
-            else:
-                frame = dict(self._latest_frame or {})
-        if frame.get("task_run_id") != task_run_id:
-            result = {"available": False, "task_run_id": task_run_id}
-            if camera_id is not None:
-                result["camera_id"] = camera_id
-            return result
-        return frame
-
-    def latest_frames(self, task_run_id: str) -> dict[str, Any]:
-        """Return the latest available frame for every camera in a task."""
-        self._validate_id(task_run_id, "task_run_id")
-        with self._lock:
-            frames = {
-                camera_id: dict(frame)
-                for (run_id, camera_id), frame in self._latest_frames.items()
-                if run_id == task_run_id and frame.get("task_run_id") == task_run_id
-            }
-        return {"task_run_id": task_run_id, "frames": frames}
 
     def _run(
         self, task_run_id: str, mode: str, pipeline: str, duration_seconds: float,
@@ -262,8 +196,9 @@ class InspectionService:
                 headless=True,
                 stop_event=self._stop_event,
                 status_callback=lambda value: self._update(task_run_id, mode, value),
-                frame_callback=lambda value: self._update_latest_frame(task_run_id, value),
                 camera_ids=camera_ids or None,
+                output_directory=self._active["output_dir"],
+                task_name=self._active["task_name"],
             )
             if isinstance(result, Mapping):
                 self._update(task_run_id, mode, result)
@@ -302,14 +237,6 @@ class InspectionService:
             self._active = current
             self._write_status(current)
 
-    def _update_latest_frame(self, task_run_id: str, values: Mapping[str, Any]) -> None:
-        with self._lock:
-            frame = {"task_run_id": task_run_id, "available": True, **dict(values)}
-            self._latest_frame = frame
-            camera_id = str(frame.get("camera_id", ""))
-            if camera_id:
-                self._latest_frames[(task_run_id, camera_id)] = frame
-
     def _write_status(self, status: Mapping[str, Any], *, force: bool = False) -> None:
         state = status.get("state")
         if not force and state == self._persisted_state and time.monotonic() - self._last_write < 0.5:
@@ -326,24 +253,6 @@ class InspectionService:
             self._run_store.save(status)
         self._last_write = time.monotonic()
         self._persisted_state = state
-
-    @staticmethod
-    def _public_event(event: Mapping[str, Any]) -> dict[str, Any]:
-        value = dict(event)
-        camera_id = str(value.get("camera_id", ""))
-        frame_id = int(value.get("frame_id", 0))
-        value["detection_id"] = f"{camera_id}-{frame_id:08d}"
-        for source_key, public_key in (
-            ("original_image", "original_image_id"),
-            ("result_image", "result_image_id"),
-        ):
-            source = value.pop(source_key, None)
-            if source:
-                value[public_key] = f"{camera_id}:{Path(str(source)).name}"
-        value["detections"] = list(value.get("detections") or [])
-        value["latency_ms"] = value.get("latency_ms")
-        value["captured_at"] = value.get("captured_at")
-        return value
 
     @staticmethod
     def _validate_id(value: str, name: str) -> None:

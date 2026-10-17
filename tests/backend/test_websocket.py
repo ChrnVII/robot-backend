@@ -26,18 +26,7 @@ def test_inspection_topic(client):
         message = websocket.receive_json()
     assert message["type"] == "inspection"
     assert message["data"]["status"]["state"] == "running"
-    assert message["data"]["detections"]["items"] == []
-    assert message["data"]["frame"]["available"] is False
-    assert "frames" in message["data"]
-
-
-def test_video_topic(client):
-    client.post("/api/v1/video/streams", json={"streamId": "ws-video", "cameraIds": ["cam01"]})
-    with client.websocket_connect("/ws/video/ws-video?cameraId=cam01") as websocket:
-        message = websocket.receive_json()
-    assert message["type"] == "video"
-    assert message["data"]["streamId"] == "ws-video"
-    assert message["data"]["frame"]["available"] is False
+    assert set(message["data"]) == {"status"}
 
 
 def test_invalid_inspection_id_closes_with_bad_data(client):
@@ -49,7 +38,7 @@ def test_invalid_inspection_id_closes_with_bad_data(client):
 
 def test_invalid_camera_id_closes_with_bad_data(client):
     client.post("/api/v1/video/streams", json={"streamId": "ws-video-bad"})
-    with client.websocket_connect("/ws/video/ws-video-bad?cameraId=bad camera") as websocket:
+    with client.websocket_connect("/ws/inspections/ws-video-bad/cameras/bad camera") as websocket:
         with pytest.raises(WebSocketDisconnect) as excinfo:
             websocket.receive_json()
     assert excinfo.value.code == 1007
