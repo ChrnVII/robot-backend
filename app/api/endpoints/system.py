@@ -7,9 +7,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel
@@ -22,6 +19,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import current_settings, get_camera_directory, get_media_service, get_robot_service
 from app.common.clock import utc_now_iso
 from app.common.exceptions import AppError
+from app.common.local_folder import reveal_in_file_manager as _reveal_in_file_manager
 from app.common.responses import ok, trace_of
 from app.schemas.media import MediaCaptureRequest
 from app.schemas.system import PlatformResponse
@@ -130,25 +128,6 @@ def camera_recordings(
     recorder = get_camera_stream_service().recorder
     # 同时返回目录绝对路径：前端「打开文件夹」需要它，且不需要用户手填。
     return ok({"rows": recorder.files(), "dir": str(recorder.directory)}, trace_of(request))
-
-
-def _reveal_in_file_manager(path: str) -> tuple[bool, str]:
-    """在**后端所在主机**上拉起系统文件管理器，返回 (是否成功, 失败原因)。
-
-    浏览器安全策略禁止 http(s) 页面导航到 file://，所以「打开录像目录」只能由
-    服务端执行。路径统一取服务里配置好的目录，不接受调用方传入，
-    避免这个接口退化成任意路径打开器。
-    """
-    try:
-        if sys.platform.startswith("win"):
-            os.startfile(path)  # noqa: S606 - 固定配置目录，非用户输入
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])  # noqa: S603
-        else:
-            subprocess.Popen(["xdg-open", path])  # noqa: S603
-        return True, ""
-    except Exception as exc:  # noqa: BLE001 - 无桌面会话 / 命令缺失都走降级
-        return False, str(exc)
 
 
 @router.post("/cam/recordings/open", tags=["system"])

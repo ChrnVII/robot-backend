@@ -14,12 +14,151 @@
     "api": {"type": "object"},
     "safety": {"type": "object"},
     "sync": {"type": "object"},
-    "inspection": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["single", "four", "eight"]}, "queue_size": {"type": "integer", "minimum": 1}, "batch_size": {"type": "integer", "minimum": 1}, "capture_fps": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}}},
+    "inspection": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["single", "four", "eight"]}, "decode_threads": {"type": "integer", "minimum": 1, "maximum": 8}, "max_frame_age_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 10}, "stream_stall_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}, "camera_startup_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}, "capture_fps": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}}},
     "models": {"type": "object"},
     "legacy_compat": {"type": "object"}
   },
   "$defs": {
-    "audio": {"type": "object", "additionalProperties": false, "properties": {"device": {"type": ["string", "integer", "null"]}, "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000}, "channels": {"type": "integer", "minimum": 1, "maximum": 8}, "duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}, "gain_db": {"type": "number"}, "silence_rms_dbfs": {"type": "number", "minimum": -120, "maximum": 0}, "clip_ratio_threshold": {"type": "number", "minimum": 0, "maximum": 1}, "block_frames": {"type": "integer", "minimum": 128}, "timeout_margin_seconds": {"type": "number", "minimum": 0}, "max_retries": {"type": "integer", "minimum": 0, "maximum": 5}, "retry_delay_seconds": {"type": "number", "minimum": 0}}},
-    "camera": {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string", "minLength": 1}, "camera_id": {"type": "string", "minLength": 1}, "enabled": {"type": "boolean"}, "transport": {"enum": ["v4l2", "http", "rtsp"]}, "device": {"type": ["string", "integer"]}, "host": {"type": "string", "minLength": 1}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "path": {"type": "string", "minLength": 1}, "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}, "warmup_frames": {"type": "integer", "minimum": 0, "maximum": 30}, "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60}, "username": {}, "password": {}, "auth_scheme": {"enum": ["basic", "digest", "none"]}, "stream": {"type": "integer", "minimum": 0}, "jpeg_quality": {"type": "integer", "minimum": 1, "maximum": 100}}}
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ]
+        },
+        "sample_rate": {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 192000
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 60
+        },
+        "gain_db": {
+          "type": "number"
+        },
+        "silence_rms_dbfs": {
+          "type": "number",
+          "minimum": -120,
+          "maximum": 0
+        },
+        "clip_ratio_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "block_frames": {
+          "type": "integer",
+          "minimum": 128
+        },
+        "timeout_margin_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "retry_delay_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "camera_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "transport": {
+          "enum": [
+            "v4l2",
+            "http",
+            "rtsp"
+          ]
+        },
+        "device": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detection_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "warmup_frames": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 60
+        },
+        "username": {},
+        "password": {},
+        "auth_scheme": {
+          "enum": [
+            "basic",
+            "digest",
+            "none"
+          ]
+        },
+        "stream": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "jpeg_quality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    }
   }
 }

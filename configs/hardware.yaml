@@ -13,6 +13,7 @@ devices:
     host: 192.168.137.64
     port: 554
     path: /Streaming/Channels/101
+    detection_path: /Streaming/Channels/102
     width: 1280
     height: 720
     timeout_seconds: 5
@@ -44,6 +45,7 @@ devices:
         host: 192.168.136.11
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
         width: 1280
@@ -55,6 +57,7 @@ devices:
         host: 192.168.136.12
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam03
@@ -63,6 +66,7 @@ devices:
         host: 192.168.136.13
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam04
@@ -71,6 +75,7 @@ devices:
         host: 192.168.136.14
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam05
@@ -79,6 +84,7 @@ devices:
         host: 192.168.136.21
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam06
@@ -87,6 +93,7 @@ devices:
         host: 192.168.136.22
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam07
@@ -95,6 +102,7 @@ devices:
         host: 192.168.136.23
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
       - id: cam08
@@ -103,6 +111,7 @@ devices:
         host: 192.168.136.24
         port: 554
         path: /avstream/channel=1/stream=0.sdp
+        detection_path: /avstream/channel=1/stream=1.sdp
         username: ${INSPECTION_CAMERA_USERNAME:-admin}
         password: ${INSPECTION_CAMERA_PASSWORD:-admin123}
   audio:
@@ -124,9 +133,11 @@ devices:
     timeout_seconds: 2
 inspection:
   mode: single
-  queue_size: 2
-  batch_size: 8
+  # Per-camera inference ceiling; preview and original recording keep source FPS.
   capture_fps: 2
+  decode_threads: 1
+  max_frame_age_seconds: 1
+  stream_stall_timeout_seconds: 15
   camera_startup_timeout_seconds: 30
 storage:
   backend: postgresql
@@ -173,6 +184,7 @@ models:
     sha256: DCA2001ACD89EDB5AA52AEF89D09DA83AD941CEEC79CEF7942FB999371120D49
     # Defaults to CPU so the same config works on robots without NVIDIA runtime.
     device: ${MODEL_DEVICE:-cpu}
+    cpu_threads: 4
     imgsz: 640
     conf: 0.25
     iou: 0.7

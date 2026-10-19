@@ -31,9 +31,10 @@ class ModelAdapterRegistry:
 
 def _heat_stress_builder(package: ModelPackage, settings: Mapping[str, Any], media_root: Path) -> ModelAdapter:
     return HeatStressAdapter(
-        package, media_root=media_root, device=str(settings.get("device", "0")),
+        package, media_root=media_root, device=str(settings.get("device", "cpu")),
         imgsz=int(settings.get("imgsz", 640)), conf=float(settings.get("conf", 0.25)),
         iou=float(settings.get("iou", 0.7)),
+        cpu_threads=settings.get('cpu_threads', 4),
     )
 
 

@@ -12,28 +12,47 @@ class RecordingChannel:
         self.origin = None
         self.offset = 0
         self.session = 0
+        self._lock = threading.Lock()
+        self._arrival_anchor = None
 
     def submit(self, packet, template):
+        arrived_at = time.monotonic()
         source = packet.dts if packet.dts is not None else packet.pts
         tb = packet.time_base or template.time_base
         if source is None or not tb:
             raise RuntimeError('摄像头数据包缺少时间戳')
         if self.origin is None:
             if not packet.is_keyframe:
-                return
+                return False
             self.origin = float(source * tb)
             self.offset = time.monotonic() - self.owner.started
             self.session += 1
         self.owner.offer((self.camera_id, bytes(packet), packet.pts, packet.dts,
                           packet.duration, tb, bool(packet.is_keyframe), template,
                           self.origin, self.offset))
+        with self._lock:
+            self._arrival_anchor = (arrived_at,
+                float((packet.pts if packet.pts is not None else packet.dts) * tb) - self.origin + self.offset,
+                self.session)
+        return True
 
-    def timestamp(self, src_pts):
-        return dict(src_pts=src_pts, video_pts=None if src_pts is None or self.origin is None else
-                    round(src_pts - self.origin * 1000 + self.offset * 1000), session=self.session,
-                    track_index=self.owner.track_indices.get(self.camera_id))
+    def arrival_timestamp(self, arrived_at, max_age=1.0):
+        """Approximate cross-stream correlation; never mix main/sub source PTS.
+
+        Network/encoder latency differs between streams. This is a host arrival
+        estimate, not frame-exact synchronization. Gaps have no video timestamp.
+        """
+        with self._lock:
+            anchor = self._arrival_anchor
+        valid = anchor is not None and abs(arrived_at - anchor[0]) <= max_age
+        return dict(video_pts=max(0, round((anchor[1] + arrived_at - anchor[0]) * 1000)) if valid else None,
+                    session=anchor[2] if valid else None,
+                    track_index=self.owner.track_indices.get(self.camera_id),
+                    video_time_basis='host_arrival_estimate')
 
     def finish(self):
+        with self._lock:
+            self._arrival_anchor = None
         # Ensure the writer has cloned the template before the input container closes.
         done = threading.Event()
         self.owner.offer(('barrier', done))

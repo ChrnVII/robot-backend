@@ -1,13 +1,15 @@
-"""Inspection tasks, JSON results and task folder files."""
+"""Inspection tasks, JSON results and opening task directories."""
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse
 
 from app.api.deps import get_inspection_service
 from app.api.validation import ensure_id
 from app.common.responses import ok, trace_of
+from app.common.local_folder import reveal_in_file_manager
 from app.schemas.inspection import StartInspectionRequest
 from app.services.inspection import InspectionService
 
@@ -75,34 +77,17 @@ async def _task_directory(inspection, task_run_id):
     value = status.get('outputDir')
     root = Path(__file__).resolve().parents[3] / 'data' / 'cams'
     directory = Path(value).resolve() if value else None
-    if directory is None or not directory.is_relative_to(root.resolve()) or not directory.is_dir():
+    if directory is None or directory == root.resolve() or not directory.is_relative_to(root.resolve()) or not directory.is_dir():
         raise AppError('任务文件夹不存在', code='NOT_FOUND', status_code=404)
-    return directory, status
+    return directory
 
 
-@router.get('/inspections/{task_run_id}/files', tags=['inspection'])
-async def inspection_files(request: Request, task_run_id: str,
-                           inspection: InspectionService = Depends(get_inspection_service)):
-    directory, status = await _task_directory(inspection, task_run_id)
-    active = status.get('state') in {'starting', 'running', 'stopping'}
-    files = [dict(name=name, size=(directory / name).stat().st_size, writing=active and name == 'video.mkv')
-             for name in ('video.mkv', 'inspection.json') if (directory / name).is_file()]
-    return ok(dict(dir=str(directory), files=files), trace_of(request))
-
-
-@router.get('/inspections/{task_run_id}/files/{name}', tags=['inspection'])
-async def inspection_file(task_run_id: str, name: str,
-                          inspection: InspectionService = Depends(get_inspection_service)):
-    from app.common.exceptions import AppError
-    from fastapi.responses import Response
-    directory, status = await _task_directory(inspection, task_run_id)
-    if name not in {'video.mkv', 'inspection.json'} or not (directory / name).is_file():
-        raise AppError('文件不存在', code='NOT_FOUND', status_code=404)
-    if name == 'video.mkv' and status.get('state') in {'starting', 'running', 'stopping'}:
-        raise AppError('录像正在写入，请先停止任务', code='RECORDING_ACTIVE', status_code=409)
-    if name == 'inspection.json':
-        # Read an atomic snapshot; the writer may replace the file immediately afterwards.
-        import asyncio
-        data = await asyncio.to_thread((directory / name).read_bytes)
-        return Response(data, media_type='application/json', headers={'Content-Disposition': 'attachment; filename="inspection.json"'})
-    return FileResponse(directory / name, media_type='video/x-matroska', filename=name)
+@router.post('/inspections/{task_run_id}/open', tags=['inspection'])
+async def open_inspection_directory(request: Request, task_run_id: str,
+                                    inspection: InspectionService = Depends(get_inspection_service)):
+    directory = await _task_directory(inspection, task_run_id)
+    opened, detail = await asyncio.to_thread(reveal_in_file_manager, str(directory))
+    payload = dict(opened=opened, dir=str(directory))
+    if not opened:
+        payload['detail'] = detail
+    return ok(payload, trace_of(request))
