@@ -24,6 +24,8 @@ class IpcErrorCode:
     UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
     #: 对端显式拒绝（业务规则冲突等，语义同旧 peer_rejected）。
     PEER_REJECTED = "PEER_REJECTED"
+    #: 设备采集失败（麦克风被占用 / 打不开 / 无输入）。后端按 409 回给前端。
+    CAPTURE_FAILED = "CAPTURE_FAILED"
     #: 对端未归类内部错误。
     INTERNAL = "INTERNAL_ERROR"
 
@@ -42,7 +44,15 @@ _EXCEPTION_CODE_MAP: tuple[tuple[type[BaseException], str], ...] = (
 
 
 def ipc_error_code(error: BaseException) -> str:
-    """把服务端异常归一化为稳定错误码（未归类异常按内部错误处理）。"""
+    """把服务端异常归一化为稳定错误码（未归类异常按内部错误处理）。
+
+    异常类可声明 ``ipc_code`` 属性显式指定错误码（如 ``AudioCaptureError``
+    声明 ``CAPTURE_FAILED``）；这样领域异常不必为了错误码去继承 ValueError，
+    也不会把“设备打不开”误报成“请求参数非法”。
+    """
+    explicit = getattr(error, "ipc_code", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
     for exception_type, code in _EXCEPTION_CODE_MAP:
         if isinstance(error, exception_type):
             return code

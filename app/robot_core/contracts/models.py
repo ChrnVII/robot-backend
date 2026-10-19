@@ -103,6 +103,26 @@ class CaptureRequest:
 
 
 @dataclass(frozen=True)
+class CaptureResult:
+    """一次采集的产物：二进制内容 + 质量判定 + 电平指标。
+
+    ``quality_state`` 直接写入 ``media_assets.quality_state``（valid / degraded /
+    invalid）；``metrics`` 只随采集响应返回并落日志，不单独建列（避免为一组
+    诊断指标再提一次 schema revision）。
+    """
+
+    content: bytes
+    quality_state: str = "valid"
+    metrics: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.quality_state not in {"valid", "degraded", "invalid"}:
+            raise ContractError(f"unsupported quality state: {self.quality_state}")
+        if not isinstance(self.content, (bytes, bytearray)):
+            raise ContractError("capture content must be bytes")
+
+
+@dataclass(frozen=True)
 class InferenceRequest:
     capability: str
     asset_id: str

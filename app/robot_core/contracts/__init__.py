@@ -1,5 +1,6 @@
 from .models import (
     CaptureRequest,
+    CaptureResult,
     CommandResult,
     ContractError,
     ControlLease,
@@ -12,7 +13,7 @@ from .models import (
 )
 
 __all__ = [
-    "CaptureRequest", "CommandResult", "ContractError", "ControlLease", "DeviceCommand",
+    "CaptureRequest", "CaptureResult", "CommandResult", "ContractError", "ControlLease", "DeviceCommand",
     "DeviceState", "Event", "HealthState", "InferenceRequest", "InferenceResponse",
     "INFERENCE_CONTRACT_VERSION",
 ]

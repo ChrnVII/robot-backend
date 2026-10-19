@@ -27,10 +27,17 @@ devices:
       request_format: json
       timeout_seconds: 5
   audio:
-    device: null
-    sample_rate: 16000
+    # 已按真机实测冻结（docs/AUDIO_CAPTURE_UPLOAD_PLAN.md §0.5）：
+    # ATR USB 麦(card1) / 44.1kHz / 单声道 / 10s；增益 numid=8 固定 18（+16dB）。
+    # device 按名字子串匹配 PortAudio 输入设备，避免索引随 USB 枚举漂移。
+    device: "USB Audio"
+    sample_rate: 44100
     channels: 1
-    duration_seconds: 3.0
+    duration_seconds: 10.0
+    silence_rms_dbfs: -70.0
+    clip_ratio_threshold: 0.001
+    timeout_margin_seconds: 5.0
+    max_retries: 1
   environment:
     base_url: http://127.0.0.1:9010
     port_name: /dev/ttyS0

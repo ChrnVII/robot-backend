@@ -19,7 +19,7 @@ from app.gateways.sensor_worker import SensorWorkerGateway, create_sensor_worker
 from app.services.cameras import CameraDirectoryService
 from app.services.control import ControlService
 from app.services.inspection import InferenceQueryService, InspectionService
-from app.services.media import MediaService
+from app.services.media import MediaLibraryService, MediaService
 from app.services.robot import RobotService
 from app.services.workbench import WorkbenchService
 
@@ -61,6 +61,12 @@ def get_camera_directory() -> CameraDirectoryService:
 @lru_cache(maxsize=1)
 def get_media_service() -> MediaService:
     return MediaService(get_sensor_worker_gateway(), get_camera_directory())
+
+
+@lru_cache(maxsize=1)
+def get_media_library_service() -> MediaLibraryService:
+    # 复用后端共享 engine 只读 media_assets（与检测结果查询同一约定）。
+    return MediaLibraryService(get_settings())
 
 
 @lru_cache(maxsize=1)

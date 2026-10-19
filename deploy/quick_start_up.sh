@@ -67,6 +67,36 @@ ensure_venv() {
   [ -x .venv/bin/python ] || die ".venv/bin/python 仍不可用，请检查 uv sync 输出"
 }
 
+check_audio_deps() {
+  # 麦克风采集的系统依赖：libportaudio2（sounddevice 运行时必需，PyPI wheel 不带）
+  # 与 alsa-utils（amixer/arecord，启动预检与增益固化用）。
+  local missing=()
+  ldconfig -p 2>/dev/null | grep -qi libportaudio || missing+=(libportaudio2)
+  command -v amixer >/dev/null 2>&1 || missing+=(alsa-utils)
+  if [ "${#missing[@]}" -gt 0 ]; then
+    if command -v apt-get >/dev/null 2>&1 && [ "${ROBOT_SKIP_APT:-false}" != "true" ]; then
+      warn "缺少系统依赖: ${missing[*]}，尝试 apt 安装…"
+      sudo apt-get update -qq || true
+      sudo apt-get install -y "${missing[@]}" || die "apt 安装失败，请手动执行: sudo apt install ${missing[*]}"
+    else
+      die "缺少系统依赖: ${missing[*]}，请手动执行: sudo apt install ${missing[*]}"
+    fi
+  fi
+  .venv/bin/python -c 'import sounddevice' 2>/dev/null \
+    || die "sounddevice 无法加载（通常仍是 libportaudio2 未装或 .venv 未重建）"
+  # 硬件模式预检：按名字找配置的输入设备（device: "USB Audio"）。
+  if grep -A 4 '^  audio:' "$CONFIG" 2>/dev/null | grep -q 'mode: hardware\|device:'; then
+    .venv/bin/python - <<'PY' || warn "未按名字匹配到音频输入设备（可先继续，录音时会回退默认并打 WARN）"
+import sys, sounddevice as sd
+name = "USB Audio"
+inputs = [str(d["name"]) for d in sd.query_devices() if d["max_input_channels"] > 0]
+print("[quick-start] 音频输入设备:", inputs)
+if not any(name.lower() in n.lower() for n in inputs):
+    sys.exit(1)
+PY
+  fi
+}
+
 pid_of() {
   local pidfile="$RUN_DIR/$1.pid" pid
   [ -f "$pidfile" ] || return 1
@@ -137,6 +167,7 @@ wait_for_health() {
 do_check() {
   load_env
   ensure_venv
+  check_audio_deps
   mkdir -p "$LOG_DIR" data run
   log "冒烟检查: robot-core --check（验证配置 + PostgreSQL 连通）"
   .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
@@ -178,14 +209,18 @@ do_install() {
   fi
   load_env
   ensure_venv
+  check_audio_deps
   mkdir -p "$LOG_DIR" data run
   prepare_database
   local service_user="${SERVICE_USER:-${SUDO_USER:-$USER}}" staged
   staged="$(mktemp -d)"
+  local amixer_bin
+  amixer_bin="$(command -v amixer || printf '/usr/bin/amixer')"
   for unit in deploy/*.service.in; do
     sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
         -e "s|__SERVICE_USER__|$service_user|g" \
         -e "s|__BACKEND_PORT__|$BACKEND_PORT|g" \
+        -e "s|__BIN_AMIXER__|$amixer_bin|g" \
         "$unit" > "$staged/$(basename "$unit" .in)"
   done
   sudo cp "$staged"/*.service deploy/inspection-robot.target /etc/systemd/system/

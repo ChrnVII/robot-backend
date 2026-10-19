@@ -7,10 +7,15 @@ Conflicts=sensor-worker.service inference-worker.service
 Type=simple
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
+SupplementaryGroups=audio
 WorkingDirectory=__PROJECT_DIR__
 EnvironmentFile=-__PROJECT_DIR__/robot.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=__PROJECT_DIR__
+# USB 麦克风（card1）开机枚举较晚，alsa-restore 可能抢不到，这里每次启动兜底：
+# 关麦克风回环（防啸叫/削波）+ 固定采集增益（真机整定值 18，对应约 +16dB）。
+ExecStartPre=-/__BIN_AMIXER__ -c 1 cset numid=3 off
+ExecStartPre=-/__BIN_AMIXER__ -c 1 cset numid=8 18
 ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.robot_core.processes.inspection_worker --config __PROJECT_DIR__/configs/hardware.yaml
 Restart=on-failure
 RestartSec=2

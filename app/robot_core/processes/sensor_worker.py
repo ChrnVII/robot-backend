@@ -10,6 +10,7 @@ from app.robot_core.sensing import (
     AudioSettings,
     SensorService,
     SoundDeviceAudioProvider,
+    simulate_audio_capture,
 )
 from app.robot_core.storage import MediaStore
 from app.robot_core.storage import PlatformStore
@@ -21,7 +22,8 @@ from .common import check_output, configure_logging, parser, run
 def build_service(config, store: PlatformStore, cameras: CameraPool) -> SensorService:
     media = MediaStore(config.path("storage", "media_root"), store, config.robot_id)
     simulated = lambda request: f"simulated:{request.device_id}:{request.request_id}".encode("utf-8")
-    providers = {"camera": simulated, "thermal": simulated, "audio": simulated}
+    # 音频即使模拟也不能吐文本字节：那会落成损坏的 WAV 文件。给合法静音。
+    providers = {"camera": simulated, "thermal": simulated, "audio": simulate_audio_capture}
     camera_config = config.values.get("devices", {}).get("camera", {})
     audio_config = config.values.get("devices", {}).get("audio", {})
     providers["camera"] = cameras.capture_provider(camera_config)

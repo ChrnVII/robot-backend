@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # 检测查询因此复用该 DSN 对应的共享 engine，不再单独配置第二个地址。
     database_url: str = ""
     auto_migrate: bool = True
+    # 媒体资产根目录（音频/图片）。留空时按 platform_config 的 storage.media_root
+    # 解析，仍未配置则用 <项目>/data/media。
+    media_root: str = ""
 
     # 鉴权（目标 API；默认关闭以保持旧前端联调契约，生产开启）
     auth_enabled: bool = False
