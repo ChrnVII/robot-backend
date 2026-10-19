@@ -39,9 +39,12 @@ devices:
     timeout_seconds: 2
 inspection:
   mode: single
-  queue_size: 2
-  batch_size: 1
-  capture_fps: 3
+  # Per-camera inference ceiling; preview and original recording keep source FPS.
+  capture_fps: 2
+  decode_threads: 1
+  max_frame_age_seconds: 1
+  stream_stall_timeout_seconds: 15
+  camera_startup_timeout_seconds: 30
 storage:
   backend: postgresql
   # Local PostgreSQL; deployments provide ROBOT_DB_PASSWORD through the
@@ -87,6 +90,7 @@ models:
     enabled: false
     path: ../models/hs_detect/weights/best.pt
     device: cpu
+    cpu_threads: 4
     imgsz: 640
     conf: 0.25
     iou: 0.7

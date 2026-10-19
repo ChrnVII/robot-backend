@@ -107,7 +107,7 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   并有并发上限（64）与请求/响应大小上限。应用关闭时经 `gateway.aclose()` 释放池。
 - **WS 推送中枢**（`api/ws/`）：同一主题共享一次快照 IPC，按 cameraId 隔离视频订阅；
   每个订阅者独立发送，队列只保留最新消息，慢客户端不会拖住其他客户端。
-- **巡检视频**：每路一条 RTSP 连接，原始码流分别送浏览器与 MKV，解码帧用最新槽位送推理。
+- **巡检视频**：每路两条独立 RTSP 连接；主码流只转封装 MKV，子码流送浏览器预览，解码帧用最新槽位限频送推理。
   inspection-worker.sock.video 为私有二进制 IPC，API 鉴权后代理到 /ws/inspections/{taskRunId}/cameras/{cameraId}。
   已移除旧 JPEG/Base64 预览、逐帧证据图片和 JSONL 输出；历史磁盘文件不会自动删除。
 - **事件驱动**：控制与感知进程在设备状态采样、命令完成、逐帧推理落库时于事务内
@@ -226,21 +226,39 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 
 检测页面填写任务名并选择 1–8 路摄像头；停止任务时等待录像和 JSON 写盘完成。
 硬件配置中 cam01–cam08 对应 192.168.136.11–14、192.168.136.21–24，RTSP 地址为
-rtsp://用户:密码@IP:554/avstream/channel=1/stream=0.sdp。
+主码流 rtsp://用户:密码@IP:554/avstream/channel=1/stream=0.sdp 用于录像，
+子码流 rtsp://用户:密码@IP:554/avstream/channel=1/stream=1.sdp 用于实时预览和检测。
+每路相机两条独立 RTSP/TCP 连接（8 路共 16 条）；主码流不解码、不转码、不绘框。
+`devices.cameras.items[].path` 为主码流，`detection_path` 为子码流；球形相机对应 101 / 102。
+已知 avstream 主码流缺省可推导 stream=1，其它厂商必须配置独立 detection_path，不能回退到主码流检测。
 账号可由 INSPECTION_CAMERA_USERNAME / INSPECTION_CAMERA_PASSWORD 覆盖。
 
 结果根目录固定为后端项目的 data/cams，不接受前端提供路径。每次任务创建
 YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字符替换为下划线）：
 
-- video.mkv：原始视频转封装，每个摄像头一条独立视频轨道，轨道 title 为 cameraId。多轨 MKV 需在播放器选择轨道。
-- inspection.json：metadata 和完整 records；每条记录包含 camera_id、src_pts、video_pts（毫秒）、session、检测框及模型信息。
+- video.mkv：主码流原始视频转封装，每个摄像头一条独立视频轨道，轨道 title 为 cameraId。多轨 MKV 需在播放器选择轨道。
+- inspection.json：metadata 和完整 records；每条记录包含 camera_id、src_pts（子码流原始 PTS，毫秒）、video_pts（录像位置估计，毫秒）、session（录像会话）、detection_session（子码流会话）、检测框及模型信息。
   metadata.tracks 给出 cameraId 到实际 MKV 轨道索引的对应关系。
+  `video_time_basis=host_arrival_estimate` 明确表示按主机单调到达时钟关联，两条码流的源 PTS 不作相减；网络抖动、编码缓存会产生偏差，不保证逐帧同步。
+  主码流尚未就绪、断线或时间锚点过旧时 video_pts/session 为 null，仍保留子码流检测结果。
+  检测框 bbox_xyxy 使用子码流像素坐标，w/h 为子码流实际尺寸，recording_size 为主码流实际尺寸。
+  同视野时可按尺寸比例映射；如果相机对子码流裁剪，必须另做标定，不能直接拉伸坐标。
+
+CPU 调度使用单模型公平轮询：`inspection.capture_fps` 默认每路最多 2 次/秒，在 BGR 转换前限频；每路只存最新一帧，不追赶旧帧。
+`max_frame_age_seconds` 默认 1 秒，过旧帧直接丢弃；子码流仍完整解码以维持 H.264/H.265 参考帧，不能随机丢压缩包。
+`decode_threads` 默认每路 1 个解码线程；`models.heat_stress.cpu_threads` 默认 4，且不超过可用逻辑 CPU 数减 2（最少 1），OpenCV 使用 1 个线程。
+已移除未生效的 inspection.queue_size / batch_size 及未使用的批量推理方法。passthrough 模式仅录像和子码流预览，不解码/推理，records 为空。
+capture_fps 是检测频率上限，负载高时会自然降低；不会改变录像和预览的源帧率。它不能保证 CPU 上 8 路 × 25 帧推理。
+建议在相机端将子码流设为 H.264、640×360 或 640×480、10–15 fps、约 1 秒一个关键帧，并用实际目标验证检测召回率；主码流可保持 25 fps。
+降低子码流分辨率能降低解码/转换成本，但模型 imgsz 仍为 640，模型本身的计算量不会因此同比下降。
+部署后按 1/2/4/8 路检查 CPU、实际检测率、主码流录像时长/帧数、磁盘及网络吞吐；状态 camera_stats 提供分路收包、解码、处理、覆盖和过期帧计数。
 
 JSON 每 5 秒原子更新，队列有界且不截断记录；正常结束后清除用于恢复快照的临时日志。
 断线后等待关键帧并在统一时间轴继续录像。编码参数变化、摄像头启动超时、写盘积压或推理失败会把任务标记为失败。
-所选相机需全部成功启动；页面会显示失败原因。
+所选相机的主、子码流都需成功启动（默认 30 秒；推理模式还要求子码流解码成功）；页面按 cameraId/main 或 cameraId/sub 显示异常。
+断线短时自动重连；任一码流持续无有效录像包/解码帧超过 stream_stall_timeout_seconds（默认 15 秒）时任务失败并收尾已有文件，避免长期静默缺路。
 
-“打开检测结果”在前端显示任务文件夹，列出这两个文件并提供下载与复制路径。运行中的 MKV 不可下载，JSON 可下载最近一次完整快照。
-此视图供远程浏览器查看，不会尝试在机器人上启动资源管理器。WebCodecs 预览需要 HTTPS 或 localhost。
+“打开检测结果”调用 POST /api/v1/inspections/{taskRunId}/open，在后端所在主机的系统文件管理器中直接打开本次任务目录，与球形摄像页面共用目录打开实现。接口只接收任务编号，目录从任务状态解析并限定在 data/cams 下。
+后端无桌面会话或文件管理器不可用时，前端尝试本机打开并复制目录路径；远程浏览器无法直接打开机器人上的本地路径。已移除文件列表弹窗和巡检文件下载接口。WebCodecs 预览需要 HTTPS 或 localhost。
 
 旧 JPEG 图片和 /ws/video 预览协议已移除；/ws/inspections/{taskRunId} 只推任务状态。恢复检查点单独位于 data/inspection-state，前后端与 inspection-worker 需一起部署。

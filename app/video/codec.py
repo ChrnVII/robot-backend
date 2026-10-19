@@ -63,6 +63,10 @@ class Timeline:
         """当前时刻（毫秒），单调不减，可直接当 PTS 用。"""
         return round((time.monotonic() - self._t0_mono) * 1000.0)
 
+    def monotonic_at(self, pts_ms: int) -> float:
+        """Convert a preview arrival timestamp back to the host monotonic clock."""
+        return self._t0_mono + pts_ms / 1000.0
+
 
 def open_options(*, transport: str = "tcp", timeout_us: int = 5_000_000) -> dict[str, str]:
     """低延迟拉流参数（AVFormatContext / RTSP 协议层）。

@@ -10,14 +10,14 @@ from app.robot_core.inspection.output import InspectionOutput
 pytestmark = pytest.mark.no_database
 
 
-def source(path):
+def source(path, width=64, height=48):
     with av.open(str(path), 'w') as out:
         stream = out.add_stream('libx264', rate=25)
-        stream.width, stream.height = 64, 48
+        stream.width, stream.height = width, height
         stream.pix_fmt = 'yuv420p'
         stream.options = {'preset': 'ultrafast', 'tune': 'zerolatency', 'g': '5'}
         for i in range(12):
-            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), i * 10, dtype=np.uint8), format='rgb24')
+            frame = av.VideoFrame.from_ndarray(np.full((height, width, 3), i * 10, dtype=np.uint8), format='rgb24')
             frame.pts = i
             for packet in stream.encode(frame):
                 out.mux(packet)
@@ -80,3 +80,39 @@ def test_missing_camera_fails_recording(tmp_path):
         recorder.channels['cam01'].finish()
         with pytest.raises(RuntimeError, match='未收到全部'):
             recorder.close()
+
+
+def test_cross_stream_clock_mapping_and_gap(monkeypatch):
+    from types import SimpleNamespace
+    from app.video import inspection_recorder as module
+    clock = [100.0]
+    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    class Owner:
+        started = 99.0
+        track_indices = {'cam01': 3}
+        def offer(self, item):
+            if item[0] == 'barrier':
+                item[1].set()
+        def check(self):
+            pass
+    channel = module.RecordingChannel(Owner(), 'cam01')
+    packet = av.Packet(b'data')
+    packet.pts, packet.dts = 500000, 499960
+    packet.time_base = Fraction(1, 1000)
+    packet.is_keyframe = True
+    template = SimpleNamespace(time_base=packet.time_base)
+    assert channel.arrival_timestamp(100)['video_pts'] is None
+    assert channel.submit(packet, template)
+    snapshot = channel.arrival_timestamp(100.02)
+    assert snapshot['video_pts'] == 1060  # 1s task offset + 40ms B-frame delta + 20ms arrival
+    assert snapshot['session'] == 1
+    assert snapshot['track_index'] == 3
+    assert channel.arrival_timestamp(102)['video_pts'] is None
+    channel.finish()
+    assert channel.arrival_timestamp(100.02)['video_pts'] is None
+    clock[0] = 103
+    packet.pts, packet.dts = 7000000, 7000000
+    channel.submit(packet, template)
+    assert channel.arrival_timestamp(103.02)['video_pts'] == 4020
+    assert channel.arrival_timestamp(103.02)['session'] == 2
+    assert snapshot['video_pts'] == 1060  # old captured detection must not be reinterpreted

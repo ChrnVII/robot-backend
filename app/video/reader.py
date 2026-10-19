@@ -1,4 +1,4 @@
-"""RTSP 拉流线程：一条连接、全程不解码转码，只解封装 +（可选）解码喂检测。
+"""RTSP 拉流线程：每个实例一条连接，原始转封装 / 预览 / 可选检测解码。
 
 数据流（单读者线程，同一份码流零拷贝扇出）::
 
@@ -6,12 +6,14 @@
                                         └─► decode ──► 最新帧槽位 ──► 检测线程
 
 录像按需将同一份原始码流转封装为 MKV，独立写盘队列不阻塞预览。
+多路巡检单独创建主码流录像实例（broadcaster=None），以及子码流预览/检测实例。
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 from app.video.codec import (
@@ -76,12 +78,12 @@ def _set_low_delay(av_module: Any, stream: Any) -> None:
 
 
 class RtspStreamReader(threading.Thread):
-    """唯一的一条 RTSP 连接；断线自动重连，线程顶层兜住所有异常。"""
+    """管理一条 RTSP 连接；断线自动重连，线程顶层兜住所有异常。"""
 
     def __init__(
         self,
         url: str,
-        broadcaster: CameraBroadcaster,
+        broadcaster: CameraBroadcaster | None,
         *,
         stop_event: threading.Event,
         slot: FrameSlot | None = None,
@@ -89,18 +91,23 @@ class RtspStreamReader(threading.Thread):
         transport: str = "tcp",
         timeout_us: int = 5_000_000,
         reconnect_delay: float = 2.0,
+        decode_threads: int = 0,
+        timeline: Timeline | None = None,
     ) -> None:
         super().__init__(name="camera-stream-reader", daemon=True)
         self.url = url
         self.broadcaster = broadcaster
         self.slot = slot
         self.recorder = recorder
+        if broadcaster is None and (slot is not None or recorder is None):
+            raise ValueError('A record-only reader requires a recorder and no decoder slot')
+        self.decode_threads = max(0, int(decode_threads))
         self._stop_event = stop_event
         self._options = open_options(transport=transport, timeout_us=timeout_us)
         self._io_timeout = max(0.1, timeout_us / 1_000_000)
         self.reconnect_delay = max(0.2, float(reconnect_delay))
 
-        self.timeline = Timeline()
+        self.timeline = timeline or Timeline()
         self.fatal: str = ""
         self.last_error: str = ""
         self.connected = False
@@ -108,6 +115,12 @@ class RtspStreamReader(threading.Thread):
         self.packets_rx = 0
         self.keyframes_rx = 0
         self.decode_errors = 0
+        self.decoded_frames = 0
+        self.last_packet_at = 0.0
+        self.last_frame_at = 0.0
+        self.last_recorded_at = 0.0
+        self.recorded_packets = 0
+        self.size = (0, 0)
 
         self._av: Any = None
         self._error_cls: type[BaseException] = Exception
@@ -126,7 +139,7 @@ class RtspStreamReader(threading.Thread):
             import av  # noqa: PLC0415 - 惰性导入，避免把 av 变成硬依赖
         except ImportError:
             self.fatal = "pyav_missing"
-            logger.error("未安装 PyAV（pip install av），球形摄像头低延迟预览已禁用")
+            logger.error("未安装 PyAV（pip install av），视频拉流不可用")
             return None
         self._av = av
         # PyAV >= 14 删除了 av.AVError，改名 av.error.FFmpegError
@@ -185,10 +198,13 @@ class RtspStreamReader(threading.Thread):
         av = self._load_av()
         if av is None:
             return
-        logger.info("摄像头预览拉流线程启动：%s", mask_credentials(self.url))
+        logger.info("摄像头拉流线程启动：%s", mask_credentials(self.url))
         while not self._stop_event.is_set():
             try:
                 self._session(av)
+                if not self._stop_event.is_set():
+                    self.last_error = 'RTSP 视频流已结束，正在重连'
+                    self._stop_event.wait(self.reconnect_delay)
             except self._error_cls as exc:  # noqa: PERF203 - 按类型分流日志级别
                 self.connected = False
                 if self._stop_event.is_set():
@@ -210,7 +226,7 @@ class RtspStreamReader(threading.Thread):
                 else:
                     logger.exception("拉流线程异常，%.1fs 后重连", self.reconnect_delay)
                 self._stop_event.wait(self.reconnect_delay)
-        logger.info("摄像头预览拉流线程退出")
+        logger.info("摄像头拉流线程退出")
 
     def _session(self, av: Any) -> None:
         # PyAV 的 options 值统一给字符串，避免不同版本对类型校验不一致
@@ -219,11 +235,18 @@ class RtspStreamReader(threading.Thread):
             if not container.streams.video:
                 raise RuntimeError("该 RTSP 地址里没有视频流")
             stream = container.streams.video[0]
+            self.size = (int(stream.codec_context.width or 0), int(stream.codec_context.height or 0))
+            if self.broadcaster is None:
+                # Main stream: no decoder, NAL scanning, preview payload or RGB allocation.
+                self._record_only(container, stream)
+                return
 
             # FRAME 级多线程解码会缓冲 thread_count 帧，是隐藏的延迟来源；
             # SLICE 级并行没有这个代价，画面越大收益越明显。
             try:
                 stream.thread_type = "SLICE"
+                if self.slot is not None and self.decode_threads:
+                    stream.codec_context.thread_count = self.decode_threads
             except Exception:  # noqa: BLE001 - 个别编码器不支持
                 pass
             _set_low_delay(av, stream)
@@ -287,6 +310,7 @@ class RtspStreamReader(threading.Thread):
                     # 实时链路的 pts：这一帧的到达时刻（WebSocket 帧头与此同值）
                     pts_ms = self.timeline.now_ms()
                     self.packets_rx += 1
+                    self.last_packet_at = time.monotonic()
                     if packet.pts is not None:
                         packet_times[packet.pts] = pts_ms
                         if len(packet_times) > 120:
@@ -315,7 +339,7 @@ class RtspStreamReader(threading.Thread):
                         self.broadcaster.broadcast(pack_frame(flags, pts_ms, self._seq) + payload)
 
                     # 解码交给检测线程用；子码流很便宜，放这里可以不额外占一条 RTSP 连接。
-                    if self.slot is not None:
+                    if self.slot is not None and preview_ready:
                         try:
                             frames = packet.decode()
                         except self._error_cls:
@@ -326,6 +350,8 @@ class RtspStreamReader(threading.Thread):
                                 )
                             frames = []
                         if frames:
+                            self.decoded_frames += len(frames)
+                            self.last_frame_at = time.monotonic()
                             last = frames[-1]
                             source_pts = last.pts if last.pts is not None else packet.pts
                             self.slot.put(
@@ -334,6 +360,7 @@ class RtspStreamReader(threading.Thread):
                                 ticks_to_ms(source_pts, last.time_base or in_tb) if source_pts is not None else None,
                             )
             finally:
+                self.connected = False
                 if self.recorder is not None:
                     self.recorder.finish()
 
@@ -342,6 +369,26 @@ class RtspStreamReader(threading.Thread):
             "会话结束（收包 %d，关键帧 %d，解码错误 %d）",
             self.packets_rx, self.keyframes_rx, self.decode_errors,
         )
+
+    def _record_only(self, container, stream):
+        self.sessions += 1
+        self.last_error = ''
+        self.connected = True
+        try:
+            for packet in container.demux(stream):
+                if self._stop_event.is_set():
+                    break
+                if not packet.size:
+                    continue
+                if self.recorder.submit(packet, stream):
+                    self.last_recorded_at = time.monotonic()
+                    self.recorded_packets += 1
+                self.packets_rx += 1
+                self.keyframes_rx += bool(packet.is_keyframe)
+                self.last_packet_at = time.monotonic()
+        finally:
+            self.connected = False
+            self.recorder.finish()
 
     # ---------- 诊断 ---------- #
 
@@ -352,6 +399,9 @@ class RtspStreamReader(threading.Thread):
             "packets": self.packets_rx,
             "keyframes": self.keyframes_rx,
             "decodeErrors": self.decode_errors,
+            "decodedFrames": self.decoded_frames,
+            "recordedPackets": self.recorded_packets,
+            "size": list(self.size),
             "lastError": self.last_error,
             "fatal": self.fatal,
         }

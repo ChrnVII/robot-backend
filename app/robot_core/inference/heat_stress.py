@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from app.robot_core.contracts import InferenceRequest, InferenceResponse
 
@@ -14,7 +15,7 @@ class HeatStressAdapter:
 
     capability = "heat_stress_detection"
 
-    def __init__(self, package: ModelPackage | str | Path, *, media_root: str | Path | None = None, device: str = "0", imgsz: int = 640, conf: float = 0.25, iou: float = 0.7, expected_sha256: str | None = None) -> None:
+    def __init__(self, package: ModelPackage | str | Path, *, media_root: str | Path | None = None, device: str = "cpu", imgsz: int = 640, conf: float = 0.25, iou: float = 0.7, cpu_threads: int = 4, expected_sha256: str | None = None) -> None:
         self.package = package if isinstance(package, ModelPackage) else ModelPackage.from_artifact(package, model_id="heat_stress", result_schema="object-detection.v1")
         if expected_sha256 and self.package.sha256.lower() != expected_sha256.lower():
             raise ValueError("heat-stress model SHA-256 mismatch")
@@ -26,6 +27,10 @@ class HeatStressAdapter:
         self.model_path = self.package.artifact
         self.media_root = Path(media_root).expanduser().resolve() if media_root else None
         self.device, self.imgsz, self.conf, self.iou = device, int(imgsz), float(conf), float(iou)
+        if isinstance(cpu_threads, bool) or not isinstance(cpu_threads, int) or not 1 <= cpu_threads <= 64:
+            raise ValueError('models.heat_stress.cpu_threads must be an integer between 1 and 64')
+        available = getattr(os, 'process_cpu_count', os.cpu_count)() or 1
+        self.cpu_threads = min(cpu_threads, max(1, available - 2))
         self.model: Any = None
         self.names: Mapping[int, str] = {}
 
@@ -37,6 +42,10 @@ class HeatStressAdapter:
         except ImportError as error:
             raise RuntimeError("install the inference and media dependencies before loading the model") from error
         self.model = YOLO(str(self.model_path))
+        if self.device.lower() == 'cpu':
+            self._configure_cpu_threads()
+            # AutoBackend can reset torch's pool during setup; reapply before prediction.
+            self.model.add_callback('on_predict_start', self._configure_cpu_threads)
         self.names = {int(key): str(value) for key, value in dict(getattr(self.model, "names", {})).items()}
 
     def warmup(self) -> None:
@@ -59,11 +68,13 @@ class HeatStressAdapter:
         except (FileNotFoundError, ValueError) as error:
             return InferenceResponse(request.request_id, request.capability, "invalid_input", self.model_version, error_stage="input", suggested_action=str(error), trace_id=request.trace_id, model_id=self.model_id, model_sha256=self.model_sha256)
 
-    def predict_batch(self, frames: Sequence[Any]) -> list[dict[str, Any]]:
-        if self.model is None:
-            raise RuntimeError("heat-stress model is not loaded")
-        results = self.model.predict(source=list(frames), imgsz=self.imgsz, conf=self.conf, iou=self.iou, device=self.device, verbose=False)
-        return [self._result_dict(item) for item in results]
+    def _configure_cpu_threads(self, predictor=None) -> None:
+        import torch
+        import cv2
+        if torch.get_num_threads() != self.cpu_threads:
+            torch.set_num_threads(self.cpu_threads)
+        if cv2.getNumThreads() != 1:
+            cv2.setNumThreads(1)
 
     def annotate(self, image: Any, result: Mapping[str, Any]) -> Any:
         return annotate_detections(image, result)
