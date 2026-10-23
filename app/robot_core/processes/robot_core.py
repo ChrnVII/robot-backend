@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from app.contracts import (
     CommandWire,
+    DeviceQueryWire,
+    EmergencyResetWire,
     EmergencyStopWire,
     LeaseAcquireWire,
     LeaseReleaseWire,
@@ -93,6 +95,12 @@ def main() -> None:
                 stop = EmergencyStopWire.from_mapping(request)
                 await core.emergency_stop(stop.reason, stop.trace_id)
                 return {"state": core.state}
+            if operation == Op.EMERGENCY_RESET:
+                reset = EmergencyResetWire.from_mapping(request)
+                return await core.reset_emergency(reset.lease_id, reset.trace_id, reset.reason)
+            if operation == Op.DEVICE_QUERY:
+                query = DeviceQueryWire.from_mapping(request)
+                return await core.query(query.device_id, query.query, dict(query.params))
             if operation == Op.ASSET_REGISTER:
                 asset = dict(request["asset"])
                 await asyncio.to_thread(core.store.register_asset, asset)

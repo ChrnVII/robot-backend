@@ -61,7 +61,25 @@ class NetworkCameraDriverTest(unittest.TestCase):
         self.assertEqual(req.full_url, "http://camera/ISAPI/PTZCtrl/channels/1/continuous")
         self.assertEqual(req.get_method(), "PUT")
         self.assertEqual(req.get_header("Content-type"), "application/xml")
+        self.assertIn(b'<PTZData version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">', req.data)
         self.assertIn(b"<pan>-100</pan>", req.data)
+
+    def test_hikvision_state_endpoint_uses_get(self):
+        opener = FakeOpener()
+        settings = NetworkCameraControlSettings.from_mapping({
+            "protocol": "hikvision_isapi", "base_url": "http://camera",
+            "state_path": "/ISAPI/System/deviceInfo",
+        })
+        driver = NetworkCameraDriver(settings, opener=opener)
+
+        async def run():
+            await driver.open()
+            return await driver.read_state()
+
+        self.assertEqual(asyncio.run(run()).health.value, "ok")
+        req, _ = opener.requests[0]
+        self.assertEqual(req.full_url, "http://camera/ISAPI/System/deviceInfo")
+        self.assertEqual(req.get_method(), "GET")
 
     def test_hikvision_preset_path_is_expanded(self):
         opener = FakeOpener()
@@ -136,6 +154,38 @@ class NetworkCameraDriverTest(unittest.TestCase):
         req, _ = opener.requests[0]
         self.assertIn("direct=right", req.full_url)
         self.assertIsNone(req.data)
+
+
+    def test_presets_are_read_from_camera_xml(self):
+        xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<PTZPresetList xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">'
+            b'<PTZPreset><enabled>true</enabled><id>1</id><presetName>Gate</presetName></PTZPreset>'
+            b'<PTZPreset><enabled>false</enabled><id>7</id><presetName>\xe5\x85\xa5\xe5\x8f\xa3</presetName></PTZPreset>'
+            b"</PTZPresetList>"
+        )
+        requests = []
+
+        class XmlOpener:
+            def __call__(self, req, timeout):
+                requests.append(req)
+                return FakeResponse(xml)
+
+        settings = NetworkCameraControlSettings.from_mapping(
+            {"protocol": "hikvision_isapi", "base_url": "http://camera"}
+        )
+        driver = NetworkCameraDriver(settings, opener=XmlOpener())
+
+        async def run():
+            await driver.open()
+            return await driver.query("presets")
+
+        result = asyncio.run(run())
+        self.assertEqual([item["presetId"] for item in result["presets"]], [1, 7])
+        self.assertEqual(result["presets"][1]["name"], "入口")
+        self.assertFalse(result["presets"][1]["enabled"])
+        self.assertEqual(requests[0].get_method(), "GET")
+        self.assertEqual(requests[0].full_url, "http://camera/ISAPI/PTZCtrl/channels/1/presets")
 
 
 if __name__ == "__main__":

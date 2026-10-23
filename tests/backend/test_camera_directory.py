@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -164,16 +165,45 @@ def test_presets_endpoint_rejects_non_ptz_camera(tmp_path):
     from app.api.endpoints import workbench
 
     with pytest.raises(ValidationFailed) as error:
-        workbench.list_presets(_request(), cameraId="cam01", service=SimpleNamespace(), directory=directory(tmp_path))
+        asyncio.run(workbench.list_presets(
+            _request(), cameraId="cam01", service=SimpleNamespace(), directory=directory(tmp_path),
+        ))
     assert "cam01" in str(error.value)
 
 
-def test_presets_endpoint_accepts_ptz_camera(tmp_path):
+def test_presets_endpoint_prefers_camera_and_keeps_local_names(tmp_path):
+    """相机是预置点的唯一事实来源；本地库只补名字。"""
     from app.api.endpoints import workbench
 
+    async def camera_presets():
+        return [{"presetId": 1, "name": "Preset 1"}, {"presetId": 2, "name": "Preset 2"}]
+
     service = SimpleNamespace(list_presets=lambda: [{"presetId": 1, "name": "大门"}])
-    payload = workbench.list_presets(_request(), cameraId="VAR-1", service=service, directory=directory(tmp_path))
-    assert payload["data"] == [{"presetId": 1, "name": "大门"}]
+    control = SimpleNamespace(camera_presets=camera_presets)
+    payload = asyncio.run(workbench.list_presets(
+        _request(), cameraId="VAR-1", service=service, directory=directory(tmp_path), control=control,
+    ))
+    assert payload["data"]["source"] == "camera"
+    assert payload["data"]["rows"] == [
+        {"presetId": 1, "name": "大门"},
+        {"presetId": 2, "name": "Preset 2"},
+    ]
+
+
+def test_presets_endpoint_falls_back_to_cache_when_camera_unreachable(tmp_path):
+    from app.api.endpoints import workbench
+    from app.gateways.base import RobotCoreError
+
+    async def camera_presets():
+        raise RobotCoreError("core_unavailable", "robot-core offline")
+
+    service = SimpleNamespace(list_presets=lambda: [{"presetId": 1, "name": "大门"}])
+    control = SimpleNamespace(camera_presets=camera_presets)
+    payload = asyncio.run(workbench.list_presets(
+        _request(), cameraId="VAR-1", service=service, directory=directory(tmp_path), control=control,
+    ))
+    assert payload["data"]["source"] == "database"
+    assert payload["data"]["rows"] == [{"presetId": 1, "name": "大门"}]
 
 
 def test_stream_status_endpoint_accepts_default_and_ptz(tmp_path, monkeypatch):

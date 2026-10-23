@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Mapping, Optional
 
 from datetime import datetime, timedelta, timezone
 
@@ -202,6 +202,38 @@ class RobotCore:
                     logger.warning("state refresh after stop failed: %s", command.target)
         if any(result.state not in {"succeeded", "completed"} for result in results):
             raise RuntimeError("one or more devices did not confirm emergency stop")
+
+    async def reset_emergency(self, lease_id: Optional[str], trace_id: str,
+                              reason: str = "operator_reset") -> dict:
+        """解除急停锁并把控制权交还给人。
+
+        只有处于急停状态时才有意义；显式带 lease_id 时必须仍然有效，
+        避免复位接口被当成绕过租约仲裁的后门。
+        """
+        if not self.safety.emergency:
+            return {"emergency": False, "changed": False, "state": self.state}
+        if lease_id and not self.leases.validate(lease_id):
+            raise CommandRejected("control_lease_invalid")
+        self.safety.reset()
+        # 急停租约只存在于内存，且优先级最高：不主动释放的话，操作员复位后
+        # 3 秒内任何 acquire 都会被它顶掉，看起来就是「复位了但还是不能动」。
+        self.leases.drop_current("emergency_reset")
+        self.state = "idle"
+        await asyncio.to_thread(
+            self.store.append_event,
+            Event("robot.emergency_reset", "robot-core", trace_id, {"reason": reason}),
+        )
+        return {"emergency": False, "changed": True, "state": self.state}
+
+    async def query(self, device_id: str, name: str, params: Optional[Mapping[str, Any]] = None) -> dict:
+        """只读设备查询：不写命令审计、不要求租约（因为它不改变设备状态）。"""
+        device = self.devices.get(device_id)
+        if device is None:
+            raise KeyError(f"device not found: {device_id}")
+        query = getattr(device, "query", None)
+        if query is None:
+            raise ValueError(f"device does not support queries: {device_id}")
+        return dict(await query(name, dict(params or {})))
 
     async def health(self) -> dict:
         devices = {name: state.as_dict() for name, state in self._states.items()}

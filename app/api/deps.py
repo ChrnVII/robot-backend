@@ -50,7 +50,7 @@ def get_robot_service() -> RobotService:
 
 @lru_cache(maxsize=1)
 def get_control_service() -> ControlService:
-    return ControlService(get_robot_core_gateway())
+    return ControlService(get_robot_core_gateway(), get_settings())
 
 
 @lru_cache(maxsize=1)

@@ -101,6 +101,14 @@ class PlatformStore:
                 (lease.lease_id, lease.holder, lease.mode, lease.priority, lease.issued_at, lease.expires_at),
             )
 
+    def renew_lease(self, lease_id: str, expires_at: str) -> None:
+        """延长已有租约（同 holder 再次申请时复用，不新建 lease_id）。"""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE control_leases SET expires_at=? WHERE lease_id=? AND released_at IS NULL",
+                (expires_at, lease_id),
+            )
+
     def release_lease(self, lease_id: str, reason: str) -> None:
         with self.connect() as connection:
             connection.execute(

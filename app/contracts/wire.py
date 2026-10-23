@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 import math
 import re
 
@@ -32,6 +32,8 @@ class Op:
     LEASE_RELEASE = "lease.release"
     COMMAND = "command"
     EMERGENCY_STOP = "emergency.stop"
+    EMERGENCY_RESET = "emergency.reset"
+    DEVICE_QUERY = "device.query"
     ASSET_REGISTER = "asset.register"
     INSPECTION_PERSIST = "inspection.persist"
     # sensor-worker
@@ -183,6 +185,61 @@ class EmergencyStopWire:
         return cls(
             reason=_optional_str(value, "reason", "requested"),
             trace_id=str(_require(value, "trace_id")),
+        )
+
+
+@dataclass(frozen=True)
+class EmergencyResetWire:
+    """emergency.reset 请求载荷：解除急停锁。
+
+    lease_id 可为空——急停期间普通租约已被抢占，此时要求先拿租约等于要求
+    用户先绕过急停。非空时仍在校验侧强制有效，避免复位成为越权通道。
+    """
+
+    trace_id: str
+    reason: str = "operator_reset"
+    lease_id: Optional[str] = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "operation": Op.EMERGENCY_RESET,
+            "trace_id": self.trace_id,
+            "reason": self.reason,
+            "lease_id": self.lease_id,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "EmergencyResetWire":
+        lease_id = value.get("lease_id")
+        return cls(
+            trace_id=str(_require(value, "trace_id")),
+            reason=_optional_str(value, "reason", "operator_reset"),
+            lease_id=str(lease_id) if lease_id not in (None, "") else None,
+        )
+
+
+@dataclass(frozen=True)
+class DeviceQueryWire:
+    """device.query 请求载荷：只读设备查询（不写命令审计、不需要租约）。"""
+
+    device_id: str
+    query: str
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "operation": Op.DEVICE_QUERY,
+            "device_id": self.device_id,
+            "query": self.query,
+            "params": dict(self.params),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "DeviceQueryWire":
+        return cls(
+            device_id=str(_require(value, "device_id")),
+            query=str(_require(value, "query")),
+            params=dict(value.get("params") or {}),
         )
 
 

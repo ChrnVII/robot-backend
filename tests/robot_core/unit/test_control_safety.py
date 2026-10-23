@@ -55,6 +55,42 @@ class ControlSafetyTest(unittest.TestCase):
             self.safety.validate(self.command(lease.lease_id))
         self.safety.validate(self.command(lease.lease_id, action="stop"))
 
+    def test_camera_commands_remain_available_during_emergency_without_regular_lease(self):
+        self.safety.emergency = True
+        camera_command = self.command(
+            "preempted-lease", target="camera", action="camera.ptz",
+            payload={"direct": "left", "speed": 0.3},
+        )
+        self.safety.validate(camera_command)
+
+    def test_camera_stop_does_not_require_a_valid_lease(self):
+        camera_stop = self.command(
+            "expired-lease", target="camera", action="camera.ptz",
+            payload={"direct": "stop", "speed": 0},
+        )
+        self.safety.validate(camera_stop)
+
+    def test_stop_command_ignores_command_expiry(self):
+        """迟到的停止仍然要放行：拒绝它等于让设备停在动作中途。"""
+        now = datetime.now(timezone.utc)
+        stale_stop = self.command(
+            "no-lease", target="camera", action="camera.ptz", payload={"direct": "stop", "speed": 0},
+            issued_at=(now - timedelta(seconds=30)).isoformat(),
+            expires_at=(now - timedelta(seconds=29)).isoformat(),
+        )
+        self.safety.validate(stale_stop)
+
+    def test_same_holder_acquire_renews_instead_of_conflicting(self):
+        first = self.leases.acquire("console", "manual_local")
+        renewed = self.leases.acquire("console", "manual_local")
+        self.assertEqual(renewed.lease_id, first.lease_id)
+        self.assertGreater(renewed.expires_at, first.expires_at)
+
+    def test_different_holder_same_priority_still_conflicts(self):
+        self.leases.acquire("tab-a", "manual_local")
+        with self.assertRaises(LeaseConflict):
+            self.leases.acquire("tab-b", "manual_local")
+
     def test_core_executes_and_audits_simulated_command(self):
         async def scenario():
             core = RobotCore(self.store, {"motion": SimulatedDeviceDriver("motion")})
@@ -116,6 +152,20 @@ class ControlSafetyTest(unittest.TestCase):
             self.assertFalse(lift.values["moving"])
             self.assertEqual(core.state, "emergency")
             self.assertNotEqual(core.leases.current.lease_id, lease.lease_id)
+            await core.stop()
+        asyncio.run(scenario())
+
+    def test_emergency_reset_releases_control_and_restores_commands(self):
+        """急停是锁存语义：没有复位通路时，升降与底盘会永久卡在 emergency_active。"""
+        async def scenario():
+            core = RobotCore(self.store, {"motion": SimulatedDeviceDriver("motion")})
+            await core.start()
+            await core.emergency_stop("test", "trace-emergency")
+            result = await core.reset_emergency(None, "trace-reset")
+            self.assertTrue(result["changed"])
+            self.assertFalse(core.safety.emergency)
+            lease = core.leases.acquire("operator", "manual_local")
+            self.assertEqual((await core.execute(self.command(lease.lease_id))).state, "succeeded")
             await core.stop()
         asyncio.run(scenario())
 

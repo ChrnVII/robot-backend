@@ -74,7 +74,8 @@ api:
   host: 127.0.0.1
   port: 8100
 safety:
-  default_command_ttl_ms: 1000
+  # 客户端未带时间戳时的兜底有效期；API 侧统一用 ROBOT_COMMAND_TTL_MS（默认 5000）。
+  default_command_ttl_ms: 3000
   lease_ttl_ms: 3000
   max_motion_distance_m: 2.0
   minimum_battery_percent: 15.0

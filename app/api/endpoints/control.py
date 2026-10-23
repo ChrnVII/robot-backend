@@ -13,8 +13,8 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_control_service, get_workbench_service
 from app.api.validation import ensure_lease_id
-from app.common.responses import ok, trace_of
-from app.schemas.control import CommandRequest, EmergencyStopRequest, LeaseRequest
+from app.common.responses import error_response, ok, trace_of
+from app.schemas.control import CommandRequest, EmergencyResetRequest, EmergencyStopRequest, LeaseRequest
 from app.services.control import ControlService
 from app.services.workbench import WorkbenchService
 
@@ -59,7 +59,20 @@ async def execute_command(
     workbench: WorkbenchService = Depends(get_workbench_service),
 ) -> dict:
     result = await control.execute_command(body)
-    if result.get("state") not in {"completed", "succeeded"}:
+    state = str(result.get("state") or "")
+    if state == "rejected":
+        # 被拒 = 设备动作未发生，客户端可以安全地刷新租约后重试一次 → 409。
+        return error_response(
+            "COMMAND_REJECTED", _reject_reason(result), 409,
+            trace_id=trace_of(request), data=result,
+        )
+    if state == "failed":
+        # 已下发但失败，可能已部分生效：不能自动重试（重放不幂等）→ 500。
+        return error_response(
+            "COMMAND_FAILED", _reject_reason(result), 500,
+            trace_id=trace_of(request), data=result,
+        )
+    if state not in {"completed", "succeeded"}:
         return ok(result, trace_of(request))
     task = body.payload.get("task")
     task_id = str(task) if task is not None else None
@@ -82,3 +95,21 @@ async def emergency_stop(
     result = await control.emergency_stop(body)
     background_tasks.add_task(_record_emergency_alert, workbench, body.reason)
     return ok(result, trace_of(request))
+
+
+@router.post("/control/emergency-reset", tags=["control"])
+async def reset_emergency(
+    request: Request,
+    body: EmergencyResetRequest,
+    control: ControlService = Depends(get_control_service),
+) -> dict:
+    """解除急停锁（锁存语义）：不调用就一直保持急停，升降/底盘无法恢复。
+
+    审计由 robot-core 落 ``robot.emergency_reset`` 事件，这里不再重复写告警，
+    避免数据库不可用时复位被拖住。
+    """
+    return ok(await control.reset_emergency(body), trace_of(request))
+
+
+def _reject_reason(result: dict) -> str:
+    return str(result.get("rejectReason") or result.get("reject_reason") or "device_command_rejected")

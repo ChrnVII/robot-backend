@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # 机器人进程网关：通过 Linux 工控机 UDS（Unix domain socket）通信
     robot_core_socket: str = "run/robot-core.sock"
     robot_core_timeout: float = 5.0
+    # 设备命令有效期：由**服务端**盖章（issued_at/expires_at），不再采信浏览器时间。
+    # 前端与机器人时钟不同步时，客户端时间戳会让所有命令直接 command_expired；
+    # 5 秒也足够覆盖一次 DB 写入 + IPC 往返的重校验。
+    command_ttl_ms: int = 5000
     sensor_worker_socket: str = "run/sensor-worker.sock"
     sensor_worker_timeout: float = 65.0
     inspection_worker_socket: str = "run/inspection-worker.sock"

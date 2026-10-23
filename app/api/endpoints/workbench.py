@@ -8,11 +8,14 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request
+from starlette.concurrency import run_in_threadpool
 
-from app.api.deps import get_camera_directory, get_workbench_service
+from app.api.deps import get_camera_directory, get_control_service, get_workbench_service
 from app.common.exceptions import ValidationFailed
 from app.common.responses import ok, trace_of
+from app.gateways.base import GatewayError
 from app.services.cameras import CameraDirectoryService
+from app.services.control import ControlService
 from app.services.workbench import WorkbenchService
 
 router = APIRouter()
@@ -183,14 +186,37 @@ def save_stations(
 
 
 @router.get("/cam/presets", tags=["workbench"])
-def list_presets(
+async def list_presets(
     request: Request,
     cameraId: str | None = Query(default=None, description="相机编号，缺省为球形摄像头"),
     service: WorkbenchService = Depends(get_workbench_service),
     directory: CameraDirectoryService = Depends(get_camera_directory),
+    control: ControlService = Depends(get_control_service),
 ) -> dict:
+    """预置点清单：以相机为准。
+
+    本地库只是名字缓存——相机 Web 端建的预置点、或因换机丢配置，都必须以
+    设备实际存在的预置点为准，否则「列表里有点、点下去不动」。
+    相机不可达时回落到缓存，保证页面仍可用（source 会标明来源）。
+    """
     directory.require_ptz(cameraId)
-    return ok(service.list_presets(), trace_of(request))
+    cached = await run_in_threadpool(service.list_presets)
+    try:
+        presets = await control.camera_presets()
+    except GatewayError as error:
+        return ok(
+            {"rows": cached, "source": "database", "detail": str(error)},
+            trace_of(request),
+        )
+    names = {
+        int(item.get("presetId") or item.get("id") or 0): item.get("name")
+        for item in cached
+    }
+    rows = [
+        {**item, "name": names.get(int(item["presetId"])) or item.get("name") or ""}
+        for item in presets
+    ]
+    return ok({"rows": rows, "source": "camera"}, trace_of(request))
 
 
 @router.post("/cam/presets", tags=["workbench"])

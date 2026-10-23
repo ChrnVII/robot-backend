@@ -82,8 +82,15 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   `INVALID_DEVICE_ID→409`、`SENSOR_UNAVAILABLE→503`、`CAMERA_CAPTURE_ERROR/AUDIO_CAPTURE_ERROR→409`、
   `NOT_FOUND（兼容旧 KeyError/FileNotFoundError）→404`、`INVALID_REQUEST→400`、
   `VALIDATION_ERROR/INVALID_JSON→400`、`INTERNAL_ERROR→500`；
+- 设备命令的拒绝语义分两级，前端据此决定能否重试：
+  `rejected→409 COMMAND_REJECTED`（设备动作未发生，可刷新租约后重试一次）、
+  `failed→500 COMMAND_FAILED`（已下发但失败，可能部分生效，禁止重放）；
+  命令时间戳由服务端盖章（`ROBOT_COMMAND_TTL_MS`，默认 5s），不采信浏览器时钟；
+- 急停是**锁存**语义：`POST /emergency-stop` 之后必须 `POST /control/emergency-reset`
+  才能恢复升降/底盘（云台是唯一豁免设备），否则一直以 `emergency_active` 拒绝；
 - 工作台接口返回自由 JSON：`/tasks`、`/task-templates`、`/runs`、`/alerts`、
-  `/config?configType=`、`/map/stations`、`/cam/presets`、`/lift/state`（数据持久化于 PostgreSQL）；
+  `/config?configType=`、`/map/stations`、`/cam/presets`（优先读相机，`source` 标明来源）、
+  `/lift/state`（数据持久化于 PostgreSQL）；
 - WebSocket：`/ws/state`、`/ws/environment`、`/ws/inspections/{taskRunId}`，
   消息 `{"type","data","timestamp"}`，非法 ID 以 1007 关闭；鉴权开启时需携带访问令牌
   （查询参数 `accessToken` 或 `Authorization: Bearer`），缺失/非法以 1008 关闭。

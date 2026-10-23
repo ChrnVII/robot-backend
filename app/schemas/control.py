@@ -43,3 +43,15 @@ class EmergencyStopRequest(BaseModel):
         if not self.reason.strip():
             self.reason = "requested"
         return self
+
+
+class EmergencyResetRequest(BaseModel):
+    """解除急停锁。
+
+    急停期间普通租约已被 robot-core 抢占，因此 leaseId 可选；显式提供时
+    robot-core 仍会校验其有效性，避免复位变成绕过控制权仲裁的通道。
+    """
+
+    traceId: str = Field(min_length=1, max_length=128)
+    reason: str = Field(default="operator_reset", max_length=512)
+    leaseId: str | None = Field(default=None, max_length=128)

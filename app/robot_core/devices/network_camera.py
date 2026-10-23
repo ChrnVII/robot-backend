@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 from urllib import error, parse, request
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from app.robot_core.common import utc_now
@@ -15,6 +16,43 @@ from app.robot_core.contracts import CommandResult, DeviceCommand, DeviceState, 
 
 class NetworkCameraError(RuntimeError):
     """A camera control or health request failed."""
+
+
+def _local_name(tag: str) -> str:
+    """ISAPI 响应的命名空间随固件版本变化，比较时只取本地名。"""
+    return tag.rsplit("}", 1)[-1]
+
+
+def parse_isapi_presets(raw: bytes) -> list[dict[str, Any]]:
+    """解析 ``GET /ISAPI/PTZCtrl/channels/{ch}/presets`` 的 PTZPresetList。
+
+    相机端的预置点才是唯一事实来源：本地库里的名字只是缓存，不能反过来当作
+    「相机上有这个预置点」的证据。
+    """
+    if not raw:
+        return []
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError as exc:  # noqa: UP024 - 统一转成相机领域错误
+        raise NetworkCameraError(f"camera presets response is not XML: {exc}") from exc
+    presets: list[dict[str, Any]] = []
+    for node in root.iter():
+        if _local_name(node.tag) != "PTZPreset":
+            continue
+        values = {_local_name(child.tag): (child.text or "").strip() for child in node}
+        try:
+            preset_id = int(values.get("id", ""))
+        except (TypeError, ValueError):
+            continue
+        if preset_id < 1:
+            continue
+        presets.append({
+            "presetId": preset_id,
+            "name": values.get("presetName") or f"预置点 {preset_id}",
+            "enabled": values.get("enabled", "true").lower() != "false",
+        })
+    presets.sort(key=lambda item: item["presetId"])
+    return presets
 
 
 @dataclass(frozen=True)
@@ -126,7 +164,8 @@ class NetworkCameraDriver:
             headers["Authorization"] = authorization
         return headers
 
-    def _request_sync(self, path: str, payload: Any = None, *, method: Optional[str] = None) -> Any:
+    def _send_sync(self, path: str, payload: Any = None, *, method: Optional[str] = None) -> bytes:
+        """发出一次 HTTP 请求并返回原始响应体（JSON / XML 由调用方各自解析）。"""
         payload = dict(payload or {}) if isinstance(payload, Mapping) else payload
         url = self._url(path)
         headers = self._headers()
@@ -155,6 +194,10 @@ class NetworkCameraDriver:
             raise NetworkCameraError(f"camera request failed: {url}: {exc}") from exc
         if status >= 400:
             raise NetworkCameraError(f"camera returned HTTP {status}: {url}")
+        return raw
+
+    def _request_sync(self, path: str, payload: Any = None, *, method: Optional[str] = None) -> Any:
+        raw = self._send_sync(path, payload, method=method)
         if not raw:
             return {}
         try:
@@ -183,7 +226,7 @@ class NetworkCameraDriver:
                                {}, quality="invalid", raw_fault_code="device_not_open")
         try:
             if self.settings.state_path:
-                response = await self._request(self.settings.state_path)
+                response = await self._request(self.settings.state_path, method="GET")
                 values = dict(response) if isinstance(response, Mapping) else {"response": response}
             else:
                 # A GET to the configured snapshot endpoint is a vendor-neutral
@@ -200,6 +243,24 @@ class NetworkCameraDriver:
     async def _request_sync_get(self, path: str) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self._request_sync(path, method="GET"))
+
+    def _presets_collection_path(self) -> str:
+        """预置点集合地址：把 ``.../presets/{preset}`` 里的占位段裁掉。"""
+        template = self.settings.preset_path or self.settings.goto_preset_path
+        if not template:
+            raise ValueError("camera presets endpoint is not configured")
+        return template.split("{preset}")[0].rstrip("/") or template
+
+    async def query(self, name: str, params: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        """只读查询（不产生设备动作，因此不走命令审计与租约）。"""
+        if name != "presets":
+            raise ValueError(f"unsupported camera query: {name}")
+        path = self._presets_collection_path()
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None, lambda: self._send_sync(path, method="GET")
+        )
+        return {"presets": parse_isapi_presets(raw), "source": "camera"}
 
     def _hikvision_ptz_xml(self, direct: str, speed: float) -> bytes:
         value = int(round(speed * 100))
@@ -218,7 +279,8 @@ class NetworkCameraDriver:
             zoom = value
         elif direct == "zoom_out":
             zoom = -value
-        return f"<PTZData><pan>{pan}</pan><tilt>{tilt}</tilt><zoom>{zoom}</zoom></PTZData>".encode("utf-8")
+        return (f'<PTZData version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">'
+                f"<pan>{pan}</pan><tilt>{tilt}</tilt><zoom>{zoom}</zoom></PTZData>").encode("utf-8")
 
     async def execute(self, command: DeviceCommand) -> CommandResult:
         try:
