@@ -59,18 +59,33 @@ class FrameSlot:
 
 
 class ViewerClient:
-    """一个 WebSocket 订阅者。队列定长，溢出即丢，绝不允许无界积压。"""
+    """一个 WebSocket 订阅者。队列定长，溢出即丢，绝不允许无界积压。
 
-    __slots__ = ("dropped", "need_reset", "queue")
+    队列里混着两类内容，优先级不同：
+
+    - 视频帧：可丢，丢完等下一个关键帧重同步即可；
+    - JSON 消息（检测结果 / 配置 / 停止）：体量小、频率低，溢出时优先保留最近两条。
+
+    因此视频溢出只清视频帧；JSON 到达时若队列已满，牺牲最旧的一条视频帧。
+    """
+
+    __slots__ = ("dropped", "need_reset", "queue", "_json_keep")
+
+    #: 清队时最多保留几条最近的 JSON 消息（检测 + 配置/停止）。
+    JSON_KEEP = 2
 
     def __init__(self, max_queue: int = 8) -> None:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, int(max_queue)))
         self.need_reset = False
         self.dropped = 0
+        self._json_keep = min(self.JSON_KEEP, max(1, self.queue.maxsize - 1))
 
     def offer(self, item: Any) -> None:
         """只允许在事件循环线程里调用。"""
-        if isinstance(item, str):        # 配置/检测等 JSON，体量小，尽量送达
+        if isinstance(item, str):        # 配置/检测等 JSON，体量小，优先送达
+            if self.queue.full() and self._evict_oldest_video():
+                self.need_reset = True   # 丢掉视频帧后必须从关键帧重新起步
+                self.dropped += 1
             try:
                 self.queue.put_nowait(item)
             except asyncio.QueueFull:
@@ -80,10 +95,18 @@ class ViewerClient:
         if self.queue.full():
             self.dropped += 1
             self.need_reset = True
-            while True:                  # 整个清空，只保留「最新的」
+            kept: list[str] = []
+            while True:                  # 只清视频帧，JSON 原样保留
                 try:
-                    self.queue.get_nowait()
+                    current = self.queue.get_nowait()
                 except asyncio.QueueEmpty:
+                    break
+                if isinstance(current, str):
+                    kept.append(current)
+            for current in kept[-self._json_keep:]:
+                try:
+                    self.queue.put_nowait(current)
+                except asyncio.QueueFull:
                     break
 
         if self.need_reset:
@@ -96,6 +119,26 @@ class ViewerClient:
             self.queue.put_nowait(item)
         except asyncio.QueueFull:
             pass
+
+    def _evict_oldest_video(self) -> bool:
+        """丢掉队列里最早的一条视频帧；队列里没有视频帧时返回 False。"""
+        pending: list[Any] = []
+        removed = False
+        while True:
+            try:
+                current = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not removed and not isinstance(current, str):
+                removed = True
+                continue
+            pending.append(current)
+        for current in pending:
+            try:
+                self.queue.put_nowait(current)
+            except asyncio.QueueFull:
+                break
+        return removed
 
 
 class CameraBroadcaster:

@@ -71,6 +71,30 @@ def test_json_keeps_all_records_and_final_state(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ['inspection.json']
 
 
+def test_running_snapshot_holds_metadata_only_and_journal_holds_records(tmp_path):
+    """运行期快照只写元数据+计数，记录留在 journal：写入量与记录数无关。"""
+    output = InspectionOutput(tmp_path, {'task_run_id': 'test'}, snapshot_interval=.05)
+    for index in range(500):
+        output.add(dict(frame_id=index))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        value = json.loads(output.path.read_text())
+        if value.get('records_total'):
+            break
+        time.sleep(.02)
+    assert value['records'] == []                 # 快照不含记录
+    assert value['records_complete'] is False
+    assert value['records_total'] > 0
+    assert (tmp_path / '.inspection.records').exists()
+    assert (tmp_path / 'inspection.json').stat().st_size < 2048   # 体积恒定，不随记录增长
+
+    output.close({'state': 'completed'})
+    value = json.loads(output.path.read_text())
+    assert value['records_complete'] is True
+    assert len(value['records']) == 500
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['inspection.json']
+
+
 def test_missing_camera_fails_recording(tmp_path):
     path = tmp_path / 'input.mkv'
     source(path)

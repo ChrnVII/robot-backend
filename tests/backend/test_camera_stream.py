@@ -196,6 +196,38 @@ def test_viewer_client_never_blocks_on_json_backlog():
     assert client.queue.get_nowait() == "first"
 
 
+def test_viewer_client_keeps_detection_when_video_overflows():
+    """视频溢出只清视频帧：检测框不能跟着一起丢。"""
+    client = ViewerClient(max_queue=3)
+    client.offer('{"t":"det"}')
+    client.offer(pack_frame(0, 1, 1))
+    client.offer(pack_frame(0, 2, 2))
+    client.offer(pack_frame(0, 3, 3))          # 溢出：清队，但保留 JSON
+    pending = []
+    while not client.queue.empty():
+        pending.append(client.queue.get_nowait())
+    assert '{"t":"det"}' in pending
+    assert client.dropped == 1
+    assert client.need_reset is True
+    client.offer(pack_frame(FLAG_KEY, 9, 9))   # 关键帧后恢复送帧
+    assert client.queue.qsize() == 1
+
+
+def test_viewer_client_gives_json_priority_over_pending_video():
+    """队列被视频占满时，JSON 到达应挤掉最旧的视频帧而不是被丢弃。"""
+    client = ViewerClient(max_queue=2)
+    client.offer(pack_frame(0, 1, 1))
+    client.offer(pack_frame(0, 2, 2))
+    client.offer('{"t":"det"}')
+    pending = []
+    while not client.queue.empty():
+        pending.append(client.queue.get_nowait())
+    assert '{"t":"det"}' in pending
+    assert len(pending) == 2
+    assert unpack_frame_header(pending[0])[1] == 2      # 最旧的视频帧被挤掉
+    assert client.need_reset is True
+
+
 def test_broadcaster_builds_config_message_only_with_codec():
     broadcaster = CameraBroadcaster(max_queue=2)
     broadcaster.set_size((1280, 720))

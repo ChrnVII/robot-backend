@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.common.clock import utc_now_iso
 from app.common.config import Settings
+from app.common.deployment import ConfigurationError, load_platform_values
 from app.common.exceptions import ValidationFailed
 from app.db import crud
 from app.services.paging import filter_rows, paginate, parse_enabled, sort_rows
@@ -252,10 +254,36 @@ class WorkbenchService:
                 {"value": "hardware", "label": "hardware", "detail": "生产巡检环境"},
             ],
             "environment": self._settings.mode,
-            "modelPath": "models/best.pt",
+            "modelPath": self._model_path(),
+            "modelDevice": self._model_device(),
+            "modelEnabled": bool(self._model_settings().get("enabled", False)),
             "configPath": "configs/inspection.yaml",
             "resultPath": "./data/cams",
         }
+
+    def _model_settings(self) -> dict[str, Any]:
+        """读平台 YAML 里 ``models.heat_stress`` 的配置；未配置或不可读时返回空。"""
+        path = self._settings.platform_config
+        if not path:
+            return {}
+        try:
+            values = load_platform_values(Path(path))
+        except (OSError, ConfigurationError):
+            return {}
+        models = values.get("models")
+        heat = models.get("heat_stress") if isinstance(models, dict) else None
+        return dict(heat) if isinstance(heat, dict) else {}
+
+    def _model_path(self) -> str:
+        configured = self._model_settings()
+        artifact = configured.get("package") or configured.get("path")
+        if artifact:
+            return str(artifact)
+        # 没有平台配置时退回环境变量；两者都没有就如实标注，不给出并不存在的路径。
+        return self._settings.camera_stream_model or "未配置"
+
+    def _model_device(self) -> str:
+        return str(self._model_settings().get("device") or "cpu")
 
     def save_config(self, values: dict[str, Any] | None) -> dict[str, Any]:
         updates = {key: value for key, value in (values or {}).items() if key != "robotId" and value is not None}

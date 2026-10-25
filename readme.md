@@ -116,7 +116,7 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   每个订阅者独立发送，队列只保留最新消息，慢客户端不会拖住其他客户端。
 - **巡检视频**：每路两条独立 RTSP 连接；主码流只转封装 MKV，子码流送浏览器预览，解码帧用最新槽位限频送推理。
   inspection-worker.sock.video 为私有二进制 IPC，API 鉴权后代理到 /ws/inspections/{taskRunId}/cameras/{cameraId}。
-  已移除旧 JPEG/Base64 预览、逐帧证据图片和 JSONL 输出；历史磁盘文件不会自动删除。
+  浏览器侧用 WebCodecs 硬解；逐帧证据图片不落盘，历史磁盘文件不会自动删除。
 - **事件驱动**：控制与感知进程在设备状态采样、命令完成、逐帧推理落库时于事务内
   `NOTIFY robot_events`（见 `storage/database.py`），后端 `PgEventListener`
   LISTEN 后唤醒对应主题立即刷新（带防抖与最小刷新间隔）；500ms 周期作为兜底，
@@ -244,28 +244,44 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字符替换为下划线）：
 
 - video.mkv：主码流原始视频转封装，每个摄像头一条独立视频轨道，轨道 title 为 cameraId。多轨 MKV 需在播放器选择轨道。
-- inspection.json：metadata 和完整 records；每条记录包含 camera_id、src_pts（子码流原始 PTS，毫秒）、video_pts（录像位置估计，毫秒）、session（录像会话）、detection_session（子码流会话）、检测框及模型信息。
+- inspection.json：metadata 和完整 records（运行期只有 metadata + `records_total` + `records_complete=false`，
+  记录在 `.inspection.records` 只追加；任务结束后合并为完整 `records` 并置 `records_complete=true`）；每条记录包含 camera_id、src_pts（子码流原始 PTS，毫秒）、video_pts（录像位置估计，毫秒）、session（录像会话）、detection_session（子码流会话）、检测框及模型信息。
   metadata.tracks 给出 cameraId 到实际 MKV 轨道索引的对应关系。
   `video_time_basis=host_arrival_estimate` 明确表示按主机单调到达时钟关联，两条码流的源 PTS 不作相减；网络抖动、编码缓存会产生偏差，不保证逐帧同步。
   主码流尚未就绪、断线或时间锚点过旧时 video_pts/session 为 null，仍保留子码流检测结果。
   检测框 bbox_xyxy 使用子码流像素坐标，w/h 为子码流实际尺寸，recording_size 为主码流实际尺寸。
   同视野时可按尺寸比例映射；如果相机对子码流裁剪，必须另做标定，不能直接拉伸坐标。
 
-CPU 调度使用单模型公平轮询：`inspection.capture_fps` 默认每路最多 2 次/秒，在 BGR 转换前限频；每路只存最新一帧，不追赶旧帧。
+CPU 调度：`inspection.capture_fps` 默认每路最多 2 次/秒，在 BGR 转换前限频；每路只存最新一帧，不追赶旧帧。
+每轮把**到期相机的最新帧合并成一次模型调用**（`inspection.inference_batch_size`，默认 4，1 表示关闭批量），
+`HeatStressAdapter.predict_batch` 走 Ultralytics 的 `source=[...]`；适配器不支持批量时自动退化为逐帧。
 `max_frame_age_seconds` 默认 1 秒，过旧帧直接丢弃；子码流仍完整解码以维持 H.264/H.265 参考帧，不能随机丢压缩包。
 `decode_threads` 默认每路 1 个解码线程；`models.heat_stress.cpu_threads` 默认 4，且不超过可用逻辑 CPU 数减 2（最少 1），OpenCV 使用 1 个线程。
-已移除未生效的 inspection.queue_size / batch_size 及未使用的批量推理方法。passthrough 模式仅录像和子码流预览，不解码/推理，records 为空。
+passthrough 模式仅录像和子码流预览，不解码/推理，records 为空。
 capture_fps 是检测频率上限，负载高时会自然降低；不会改变录像和预览的源帧率。它不能保证 CPU 上 8 路 × 25 帧推理。
+`models.heat_stress.device`（hardware.yaml 里为 `${MODEL_DEVICE:-cpu}`）配置为非 CPU 时，加载模型前会自检
+`torch.cuda.is_available()` 与可见 GPU 数量，不满足直接报错退出，不会静默回落到 CPU 慢跑。
 建议在相机端将子码流设为 H.264、640×360 或 640×480、10–15 fps、约 1 秒一个关键帧，并用实际目标验证检测召回率；主码流可保持 25 fps。
 降低子码流分辨率能降低解码/转换成本，但模型 imgsz 仍为 640，模型本身的计算量不会因此同比下降。
-部署后按 1/2/4/8 路检查 CPU、实际检测率、主码流录像时长/帧数、磁盘及网络吞吐；状态 camera_stats 提供分路收包、解码、处理、覆盖和过期帧计数。
+部署后按 1/2/4/8 路检查 CPU、实际检测率、主码流录像时长/帧数、磁盘及网络吞吐；状态 camera_stats 提供分路收包、解码、处理、覆盖和过期帧计数，
+前端「每路状态」面板直接展示这些数字（含 camera_disabled 的停用原因）。
 
-JSON 每 5 秒原子更新，队列有界且不截断记录；正常结束后清除用于恢复快照的临时日志。
-断线后等待关键帧并在统一时间轴继续录像。编码参数变化、摄像头启动超时、写盘积压或推理失败会把任务标记为失败。
-所选相机的主、子码流都需成功启动（默认 30 秒；推理模式还要求子码流解码成功）；页面按 cameraId/main 或 cameraId/sub 显示异常。
-断线短时自动重连；任一码流持续无有效录像包/解码帧超过 stream_stall_timeout_seconds（默认 15 秒）时任务失败并收尾已有文件，避免长期静默缺路。
+记录写入是**只追加**的：运行期记录写入 `.inspection.records`（JSON Lines，1 秒 flush），
+`inspection.json` 每 5 秒只原子重写元数据与计数（`records_total`/`records_complete`，运行期 `records` 恒为空），
+收尾时按顺序合并成完整 `records` 并删除日志；写入量只与记录数成正比，与任务时长无关。
+`GET /inspections/{taskRunId}/detections` 对两种形态都做流式分页，内存占用与文件大小无关。
+断线后等待关键帧并在统一时间轴继续录像。编码参数变化、写盘积压（recorder/output 队列满或收尾超时）会把任务标记为失败。
+**单路故障只停该路**：某路主/子码流启动超时（默认 30 秒）、断流超过 `stream_stall_timeout_seconds`（默认 15 秒）
+或连续 3 次推理失败时，只把该路放进 `camera_disabled`（并把它剔除出本场 MKV 的轨道），其余各路继续检测与录像；
+码流恢复后该路自动回到检测与预览（录像轨道不可中途新增，故不回到录像）。只有全部路都不可用才失败：
+从未有一路就绪则立即失败，运行中全部掉线则给 `camera_all_failed_grace_seconds`（默认 60 秒，0 表示立即）的宽限期。
 
 “打开检测结果”调用 POST /api/v1/inspections/{taskRunId}/open，在后端所在主机的系统文件管理器中直接打开本次任务目录，与球形摄像页面共用目录打开实现。接口只接收任务编号，目录从任务状态解析并限定在 data/cams 下。
 后端无桌面会话或文件管理器不可用时，前端尝试本机打开并复制目录路径；远程浏览器无法直接打开机器人上的本地路径。已移除文件列表弹窗和巡检文件下载接口。WebCodecs 预览需要 HTTPS 或 localhost。
 
-旧 JPEG 图片和 /ws/video 预览协议已移除；/ws/inspections/{taskRunId} 只推任务状态。恢复检查点单独位于 data/inspection-state，前后端与 inspection-worker 需一起部署。
+**非安全上下文（局域网 http，HTTPS/localhost 之外）无法使用 WebCodecs**：预览 WS 此时会在连接前被前端
+判定为不可用，页面显示具体原因（`useCameraStream` 的 `blockReason`），不会产生画面。预览 WS 异常关闭时，
+服务端先推一条 `{"t":"error","code":"preview_unavailable","reason":...}` 再关闭连接，页面据此显示原因并停止重连。
+
+`/ws/inspections/{taskRunId}` 推任务状态（含 camera_stats），前端运行期订阅它、仅在连不上时退回 2 秒轮询。
+恢复检查点单独位于 data/inspection-state，前后端与 inspection-worker 需一起部署。

@@ -199,6 +199,7 @@ async def inspection_camera_socket(websocket: WebSocket, task_run_id: str, camer
     import struct
     from app.video.inspection_preview import MAX_PACKET
     writer = receiver = sender = None
+    failure = ''
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(
             str(get_settings().inspection_worker_socket) + '.video'), 5)
@@ -220,8 +221,16 @@ async def inspection_camera_socket(websocket: WebSocket, task_run_id: str, camer
         receiver = asyncio.create_task(receive())
         sender = asyncio.create_task(send())
         await asyncio.wait((receiver, sender), return_when=asyncio.FIRST_COMPLETED)
-    except (OSError, ValueError, asyncio.TimeoutError, WebSocketDisconnect):
-        pass
+    except WebSocketDisconnect:
+        failure = 'client_disconnected'
+    except asyncio.TimeoutError:
+        failure = 'inspection worker 未在 5s 内响应预览请求'
+    except asyncio.IncompleteReadError:
+        failure = 'inspection worker 关闭了预览通道（任务可能已结束）'
+    except FileNotFoundError:
+        failure = 'inspection worker 未启动（预览套接字不存在）'
+    except (OSError, ValueError) as error:
+        failure = str(error) or error.__class__.__name__
     finally:
         tasks = [task for task in (receiver, sender) if task is not None]
         for task in tasks:
@@ -229,5 +238,18 @@ async def inspection_camera_socket(websocket: WebSocket, task_run_id: str, camer
         await asyncio.gather(*tasks, return_exceptions=True)
         if writer is not None:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+        # 失败必须如实告知前端：静默 1012 会让页面只剩「反复重连」，看不出原因。
+        if failure and failure != 'client_disconnected':
+            logger.info('巡检预览通道关闭（%s/%s）：%s', task_run_id, camera_id, failure)
+            try:
+                await websocket.send_text(json.dumps({
+                    "t": "error", "code": "preview_unavailable", "reason": failure,
+                    "message": f"实时预览通道不可用：{failure}",
+                }, ensure_ascii=False))
+            except Exception:  # noqa: BLE001 - 客户端已断开时发送必然失败
+                pass
         await close_quietly(websocket, _SERVICE_RESTARTED)

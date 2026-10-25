@@ -10,9 +10,11 @@ from typing import Any, Callable, Mapping
 from app.robot_core.common import new_id
 from app.robot_core.common.config import PlatformConfig
 from app.robot_core.storage.runs import InspectionRunStore
+from . import records
 from .paths import data_root, task_directory
 
 logger = logging.getLogger(__name__)
+
 
 class InspectionService:
     """Controls one realtime inspection run and exposes its persisted evidence."""
@@ -171,13 +173,20 @@ class InspectionService:
         raise KeyError("inspection task not found")
 
     def detections(self, task_run_id: str, *, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        """分页读取检测记录。
+
+        运行中的记录只存在于 journal（JSON Lines），收尾后合并进 ``inspection.json``。
+        两者都走流式解析：内存占用只与单条记录有关，任务跑多久都不影响分页响应时间。
+        """
         self._validate_id(task_run_id, "task_run_id")
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         status = self.status(task_run_id)
-        path = Path(status["output_dir"]) / "inspection.json"
-        records = json.loads(path.read_text(encoding="utf-8")).get("records", []) if path.exists() else []
-        return {"items": records[offset:offset + limit], "offset": offset, "limit": limit, "total": len(records)}
+        directory = Path(status["output_dir"])
+        journal = directory / ".inspection.records"
+        path = journal if journal.is_file() else directory / "inspection.json"
+        items, total = records.page(path, offset, limit)
+        return {"items": items, "offset": offset, "limit": limit, "total": total}
 
     def health(self):
         return {"state": "ok", "active": self.status()}

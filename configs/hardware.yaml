@@ -169,10 +169,15 @@ inspection:
   mode: single
   # Per-camera inference ceiling; preview and original recording keep source FPS.
   capture_fps: 2
+  # Frames from multiple cameras per model call (1 disables batching).
+  inference_batch_size: 4
   decode_threads: 1
   max_frame_age_seconds: 1
   stream_stall_timeout_seconds: 15
   camera_startup_timeout_seconds: 30
+  # Grace before failing when every camera is down (0 = fail immediately).
+  # A single camera failing only disables that camera; the task keeps running.
+  camera_all_failed_grace_seconds: 60
 storage:
   backend: postgresql
   database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD}@127.0.0.1:5432/robot_platform

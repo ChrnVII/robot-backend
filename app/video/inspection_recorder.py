@@ -5,6 +5,9 @@ import threading
 import time
 from fractions import Fraction
 
+#: 收尾等待上限：磁盘挂起时不能把任务永远卡在 stopping。
+CLOSE_TIMEOUT_SECONDS = 30.0
+
 
 class RecordingChannel:
     def __init__(self, owner, camera_id):
@@ -16,6 +19,11 @@ class RecordingChannel:
         self._arrival_anchor = None
 
     def submit(self, packet, template):
+        # 被剔除出录像的路（启动超时/断流）直接跳过：MKV 轨道在开始编码后不能再
+        # 增删，剔除过就不参与这一场的录像。
+        is_blocked = getattr(self.owner, 'is_blocked', None)
+        if is_blocked is not None and is_blocked(self.camera_id):
+            return False
         arrived_at = time.monotonic()
         source = packet.dts if packet.dts is not None else packet.pts
         tb = packet.time_base or template.time_base
@@ -69,6 +77,8 @@ class InspectionRecorder:
         self.error = ''
         self.written = 0
         self.track_indices = {}
+        #: 被剔除出本场录像的相机（启动超时或断流），只用集合判成员，读写都在 GIL 下原子。
+        self.blocked: set[str] = set()
         self._queue = queue.Queue(maxsize=max_queue)
         self._thread = threading.Thread(target=self._run, name='inspection-mkv', daemon=True)
         self.channels = {key: RecordingChannel(self, key) for key in camera_ids}
@@ -78,6 +88,25 @@ class InspectionRecorder:
         if self.error:
             raise RuntimeError(self.error)
 
+    def is_blocked(self, camera_id) -> bool:
+        return camera_id in self.blocked
+
+    def drop_camera(self, camera_id):
+        """把一路摄像头剔除出本场录像，让其余各路继续录。
+
+        MKV 轨道必须在 ``start_encoding`` 之前建好，因此剔除是单向的：之后恢复的
+        摄像头回到检测与预览，但不回到录像。
+        """
+        if camera_id in self.blocked:
+            return False
+        self.blocked.add(camera_id)
+        # 主动叫醒写盘线程重算「还差几路」，否则流刚好停住时它会一直等包。
+        try:
+            self._queue.put_nowait(('drop', camera_id))
+        except queue.Full:
+            pass
+        return True
+
     def offer(self, item):
         self.check()
         try:
@@ -86,15 +115,49 @@ class InspectionRecorder:
             self.error = '录像写盘积压，任务已停止'
             raise RuntimeError(self.error) from exc
 
-    def close(self):
+    def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS):
+        deadline = time.monotonic() + max(0.0, float(timeout))
         while self._thread.is_alive():
             try:
                 self._queue.put(None, timeout=.2)
                 break
             except queue.Full:
+                if time.monotonic() >= deadline:
+                    self.error = self.error or '录像收尾超时，写盘线程未能及时退出'
+                    return
                 continue
-        self._thread.join()
+        self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            self.error = self.error or '录像收尾超时（磁盘可能已挂起）'
         self.check()
+
+    def _write(self, av, out, streams, signatures, last_dts, item):
+        key, raw, pts, dts, duration, tb, is_key, _, origin, offset = item
+        packet = av.Packet(raw)
+        # All tracks use the task monotonic timeline; preserve PTS-DTS (B frames).
+        packet.pts = round((float((pts if pts is not None else dts) * tb) - origin + offset) * 1000000)
+        packet.dts = round((float((dts if dts is not None else pts) * tb) - origin + offset) * 1000000)
+        if packet.dts <= last_dts.get(key, -1):
+            raise RuntimeError(f'{key} 摄像头时间戳回退，录像已停止')
+        last_dts[key] = packet.dts
+        packet.duration = round(float((duration or 0) * tb) * 1000000)
+        packet.time_base = Fraction(1, 1000000)
+        packet.is_keyframe = is_key
+        packet.stream = streams[key]
+        out.mux(packet)
+        self.written += 1
+
+    def _start_if_ready(self, out, streams, pending):
+        """凑齐（未被剔除的）各路首包就开录；返回需要先写出去的积压包。"""
+        if not pending:
+            return None
+        expected = len(self.camera_ids) - len(self.blocked)
+        if expected <= 0:
+            raise RuntimeError('没有可用的摄像头轨道，录像无法开始')
+        if len(streams) < expected:
+            return None
+        out.start_encoding()
+        return pending
 
     def _run(self):
         out = None
@@ -105,6 +168,14 @@ class InspectionRecorder:
             out = av.open(str(self.path), 'w', format='matroska')
             ready = False
             while True:
+                # 期望轨道数会随剔除变化，因此每轮都判断一次能否开录，
+                # 而不是等下一个数据包到达时才判断（此时队列可能已空）。
+                block = self._start_if_ready(out, streams, pending)
+                if block is not None:
+                    ready = True
+                    pending, pending_bytes = [], 0
+                    for entry in block:
+                        self._write(av, out, streams, signatures, last_dts, entry)
                 item = self._queue.get()
                 if item is None:
                     if not ready:
@@ -113,10 +184,18 @@ class InspectionRecorder:
                 if item[0] == 'barrier':
                     item[1].set()
                     continue
+                if item[0] == 'drop':
+                    pending = [entry for entry in pending if entry[0] != item[1]]
+                    pending_bytes = sum(len(entry[1]) for entry in pending)
+                    continue
                 key, raw, pts, dts, duration, tb, is_key, template, origin, offset = item
+                if key in self.blocked:
+                    continue
                 signature = (template.codec_context.name, template.codec_context.width,
                              template.codec_context.height, bytes(template.codec_context.extradata or b''))
                 if key not in streams:
+                    if ready:
+                        raise RuntimeError(f'{key} 在录像开始后才出现，请重新启动任务')
                     creator = getattr(out, 'add_stream_from_template', None)
                     stream = creator(template) if creator else out.add_stream(template=template)
                     stream.metadata['title'] = key
@@ -129,27 +208,8 @@ class InspectionRecorder:
                     pending_bytes += len(raw)
                     if pending_bytes > 128 * 1024 * 1024:
                         raise RuntimeError('等待摄像头关键帧超出录像缓冲容量')
-                    if len(streams) != len(self.camera_ids):
-                        continue
-                    out.start_encoding()
-                    ready = True
-                    batch, pending = pending, []
-                else:
-                    batch = [item]
-                for key, raw, pts, dts, duration, tb, is_key, _, origin, offset in batch:
-                    packet = av.Packet(raw)
-                    # All tracks use the task monotonic timeline; preserve PTS-DTS (B frames).
-                    packet.pts = round((float((pts if pts is not None else dts) * tb) - origin + offset) * 1000000)
-                    packet.dts = round((float((dts if dts is not None else pts) * tb) - origin + offset) * 1000000)
-                    if packet.dts <= last_dts.get(key, -1):
-                        raise RuntimeError(f'{key} 摄像头时间戳回退，录像已停止')
-                    last_dts[key] = packet.dts
-                    packet.duration = round(float((duration or 0) * tb) * 1000000)
-                    packet.time_base = Fraction(1, 1000000)
-                    packet.is_keyframe = is_key
-                    packet.stream = streams[key]
-                    out.mux(packet)
-                    self.written += 1
+                    continue
+                self._write(av, out, streams, signatures, last_dts, item)
         except Exception as exc:
             self.error = f'录像失败：{exc}'
         finally:
