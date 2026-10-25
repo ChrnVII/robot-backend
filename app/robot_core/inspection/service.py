@@ -11,7 +11,7 @@ from app.robot_core.common import new_id
 from app.robot_core.common.config import PlatformConfig
 from app.robot_core.storage.runs import InspectionRunStore
 from . import records
-from .paths import data_root, task_directory
+from .paths import camera_journal_path, camera_records_path, data_root, task_directory
 
 logger = logging.getLogger(__name__)
 
@@ -172,21 +172,59 @@ class InspectionService:
                 return dict(json.loads(path.read_text(encoding="utf-8")))
         raise KeyError("inspection task not found")
 
-    def detections(self, task_run_id: str, *, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+    def detections(self, task_run_id: str, *, offset: int = 0, limit: int = 50,
+                   camera_id: str | None = None) -> dict[str, Any]:
         """分页读取检测记录。
 
-        运行中的记录只存在于 journal（JSON Lines），收尾后合并进 ``inspection.json``。
-        两者都走流式解析：内存占用只与单条记录有关，任务跑多久都不影响分页响应时间。
+        每个摄像头一个子目录，记录按 camera_id 分开存。运行中的记录只存在于 journal
+        （JSON Lines），收尾后合并进该路的 ``inspection.json``；两者都走流式解析，
+        内存占用只与单条记录有关。指定 ``camera_id`` 只读该路；不指定则按相机顺序
+        把所有路拼起来统一分页。
         """
         self._validate_id(task_run_id, "task_run_id")
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         status = self.status(task_run_id)
         directory = Path(status["output_dir"])
-        journal = directory / ".inspection.records"
-        path = journal if journal.is_file() else directory / "inspection.json"
-        items, total = records.page(path, offset, limit)
+        if camera_id:
+            self._validate_id(camera_id, "camera_id")
+            path = self._records_path(directory, camera_id)
+            items, total = records.page(path, offset, limit)
+            return {"items": items, "cameraId": camera_id, "offset": offset,
+                    "limit": limit, "total": total}
+        items: list[dict[str, Any]] = []
+        remaining = limit
+        total = 0
+        for key in self._camera_ids(directory, status):
+            path = self._records_path(directory, key)
+            if not path.is_file():
+                continue
+            camera_total = records.count(path)
+            start = max(0, offset - total)
+            if start < camera_total and remaining > 0:
+                page, _ = records.page(path, start, min(remaining, camera_total - start))
+                items.extend(page)
+                remaining -= len(page)
+            total += camera_total
         return {"items": items, "offset": offset, "limit": limit, "total": total}
+
+    @staticmethod
+    def _records_path(directory: Path, camera_id: str) -> Path:
+        journal = camera_journal_path(directory, camera_id)
+        return journal if journal.is_file() else camera_records_path(directory, camera_id)
+
+    @staticmethod
+    def _camera_ids(directory: Path, status: Mapping[str, Any]) -> list[str]:
+        known = [str(item) for item in (status.get("camera_ids") or [])]
+        if known:
+            return known
+        # 恢复/旧检查点可能没有 camera_ids：直接看磁盘上有哪些相机目录。
+        found = []
+        for path in directory.iterdir() if directory.is_dir() else ():
+            if path.is_dir() and (camera_records_path(directory, path.name).is_file()
+                                  or camera_journal_path(directory, path.name).is_file()):
+                found.append(path.name)
+        return sorted(found)
 
     def health(self):
         return {"state": "ok", "active": self.status()}

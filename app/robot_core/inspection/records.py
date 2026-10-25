@@ -114,6 +114,35 @@ def iter_records(handle: TextIO) -> Iterator[dict[str, Any]]:
         yield from _iter_journal(handle)
 
 
+def _cache_key(path: Path) -> tuple[tuple[str, int, int], int | None]:
+    metadata = path.stat()
+    key = (str(path.resolve()), metadata.st_size, metadata.st_mtime_ns)
+    return key, _TOTAL_CACHE.get(key)
+
+
+def _remember(key: tuple[str, int, int], total: int) -> None:
+    _TOTAL_CACHE[key] = total
+    _TOTAL_CACHE.move_to_end(key)
+    while len(_TOTAL_CACHE) > _CACHE_SIZE:
+        _TOTAL_CACHE.popitem(last=False)
+
+
+def count(path: str | Path) -> int:
+    """记录总数；文件未变化时直接复用缓存。"""
+    path = Path(path)
+    if not path.is_file():
+        return 0
+    key, known = _cache_key(path)
+    if known is not None:
+        return known
+    total = 0
+    with path.open(encoding="utf-8") as handle:
+        for _record in iter_records(handle):
+            total += 1
+    _remember(key, total)
+    return total
+
+
 def page(path: str | Path, offset: int = 0, limit: int = 50) -> tuple[list[dict[str, Any]], int]:
     """返回 ``(items, total)``；``items`` 长度不超过 ``limit``。"""
     path = Path(path)
@@ -121,9 +150,7 @@ def page(path: str | Path, offset: int = 0, limit: int = 50) -> tuple[list[dict[
     limit = max(1, int(limit))
     if not path.is_file():
         return [], 0
-    metadata = path.stat()
-    key = (str(path.resolve()), metadata.st_size, metadata.st_mtime_ns)
-    known_total = _TOTAL_CACHE.get(key)
+    key, known_total = _cache_key(path)
     items: list[dict[str, Any]] = []
     total = 0
     with path.open(encoding="utf-8") as handle:
@@ -135,8 +162,5 @@ def page(path: str | Path, offset: int = 0, limit: int = 50) -> tuple[list[dict[
             if known_total is not None and total > offset + limit:
                 total = known_total
                 break
-    _TOTAL_CACHE[key] = total
-    _TOTAL_CACHE.move_to_end(key)
-    while len(_TOTAL_CACHE) > _CACHE_SIZE:
-        _TOTAL_CACHE.popitem(last=False)
+    _remember(key, total)
     return items, total

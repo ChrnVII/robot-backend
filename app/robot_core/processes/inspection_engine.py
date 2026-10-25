@@ -15,7 +15,7 @@ from app.robot_core.common import new_id
 from app.robot_core.contracts import InferenceRequest
 from app.robot_core.inference import InferenceRuntime, build_configured_adapters
 from app.robot_core.inspection.output import InspectionOutput
-from app.robot_core.inspection.paths import task_directory
+from app.robot_core.inspection.paths import camera_video_path, task_directory
 from app.video.pipeline import CameraBroadcaster, FrameSlot
 from app.video.codec import Timeline
 from app.video.reader import RtspStreamReader
@@ -131,6 +131,11 @@ def _cleanup_failed(status, message):
         status['error'] = message
 
 
+def _note_cleanup(status, message):
+    """记录单路收尾问题但不改任务状态：一路的录像坏了不影响其他路的结果。"""
+    status.setdefault('cleanup_errors', []).append(message)
+
+
 def _reader_progress(reader):
     """该 reader 的「有效进展」时刻：录像看写入、解码看帧、其余看收包。"""
     return (reader.last_recorded_at if reader.recorder is not None else
@@ -201,8 +206,9 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
     status.update(camera_waiting={}, camera_disabled={}, camera_total=len(cameras) * 2, camera_ready=0)
     status.update(recording_stream='main', detection_stream='sub', capture_fps=settings['capture_fps'],
                   video_time_basis='host_arrival_estimate', bbox_coordinate_space='substream_pixels')
-    output = InspectionOutput(directory, status)
-    recorder = None
+    output = InspectionOutput(directory, status, cameras)
+    #: 每路一个 recorder（一个单轨 MKV、一个写盘线程），互不影响。
+    recorders: dict[str, InspectionRecorder] = {}
     readers = {}
     main_readers, sub_readers = {}, {}
     slots = {}
@@ -227,27 +233,19 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
     recovery_dwell = max(2.0, min(stall_timeout, 10.0))
 
     def disable_camera(key, reason):
-        """把一路从推理/预览/录像里摘掉，其余各路继续跑。
+        """把这一路停掉，其余各路继续跑；码流恢复后会自动回到检测（见循环里的恢复分支）。
 
-        MKV 的轨道必须在开始编码前建好，所以这一路也被永久剔出本场录像；
-        之后即使码流恢复，也只恢复检测与预览（见循环里的恢复分支）。
+        每路一个录像文件，所以这里不需要动录像：该路的主码流还在就继续录，
+        断流就自然停下来，收尾时该路文件单独合并/报错。
         """
         if key in disabled:
             return
         disabled[key] = reason
         next_detection[key] = 0.0
-        if recorder is not None:
-            recorder.drop_camera(key)
         logger.warning('摄像头已停用（%s）：%s', key, reason)
 
     def progress_of(key, reader):
-        """该 reader 的有效进展。
-
-        被剔除出录像的主码流只收包不入库，``last_recorded_at`` 会停住，这时改用
-        收包时刻判断，避免恢复后的相机立刻又被判成断流。
-        """
-        if reader.recorder is not None and recorder is not None and recorder.is_blocked(key):
-            return reader.last_packet_at
+        """该 reader 的有效进展时刻。"""
         return _reader_progress(reader)
 
     def camera_stats():
@@ -272,15 +270,17 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
             runtime.start()
         started = time.monotonic()
         startup_deadline = started + settings['camera_startup_timeout_seconds']
-        recorder = InspectionRecorder(directory / 'video.mkv', cameras)
+        for key in cameras:
+            # 每路一个目录：<任务>/<camera>/video.mkv + inspection.json
+            recorders[key] = InspectionRecorder(camera_video_path(directory, key), [key])
         timeline = Timeline()
-        slots = {key: InspectionFrameSlot(recorder.channels[key], timeline) for key in cameras}
+        slots = {key: InspectionFrameSlot(recorders[key].channels[key], timeline) for key in cameras}
         if preview:
             preview.bind(task_run_id, channels)
         for key in cameras:
             timeout_us = int(float(cameras[key].get('timeout_seconds', 5)) * 1_000_000)
             main_readers[key] = RtspStreamReader(urls[key][0], None, stop_event=stop,
-                recorder=recorder.channels[key], timeout_us=timeout_us)
+                recorder=recorders[key].channels[key], timeout_us=timeout_us)
             sub_readers[key] = RtspStreamReader(urls[key][1], channels[key], stop_event=stop,
                 slot=slots[key] if pipeline == 'inference' else None, timeout_us=timeout_us,
                 decode_threads=settings['decode_threads'], timeline=timeline)
@@ -292,7 +292,14 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
             reader.start()
 
         while True:
-            recorder.check()
+            # 单路的录像写盘故障只停这一路，不再整场失败。
+            for key, rec in recorders.items():
+                if key in disabled:
+                    continue
+                try:
+                    rec.check()
+                except RuntimeError as exc:
+                    disable_camera(key, str(exc))
             if output.error:
                 raise RuntimeError(output.error)
             if stop_event is not None and stop_event.is_set():
@@ -372,7 +379,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                     continue
                 # Rate limit before expensive conversion/inference. Never catch up old work.
                 next_detection[key] = time.monotonic() + 1 / settings['capture_fps']
-                timing['track_index'] = recorder.track_indices.get(key)
+                timing['track_index'] = recorders[key].track_indices.get(key)
                 image = frame.to_ndarray(format='bgr24')
                 counts[key] += 1
                 batch.append((key, image, timing, pts))
@@ -433,7 +440,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                 status['camera_ready'] = sum(1 for key in readers
                                              if key.split('/')[0] not in disabled
                                              and key not in errors and key not in waiting)
-                status['recorded_packets'] = recorder.written
+                status['recorded_packets'] = sum(rec.written for rec in recorders.values())
                 status['records_total'] = output.count
                 status['camera_stats'] = camera_stats()
                 if status_callback:
@@ -445,7 +452,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
         status.update(state='failed', error=str(exc))
     finally:
         stop.set()
-        # Input containers own codec templates: drain the recorder before closing them.
+        # Input containers own codec templates: drain the recorders before closing them.
         join_deadline = time.monotonic() + max((r._io_timeout for r in readers.values()), default=5) + 5
         for reader in readers.values():
             if reader.ident is None:
@@ -455,20 +462,26 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                 _cleanup_failed(status, '摄像头拉流线程未能及时退出')
         if preview:
             preview.clear()
-        if recorder:
-            try:
-                # 有超时的收尾：磁盘挂起时宁可报清理错误，也不能永远卡在 stopping。
-                recorder.close(timeout=15)
-            except Exception as exc:
-                _cleanup_failed(status, str(exc))
+        if recorders:
+            # 逐路收尾，共用一个截止时间：某一路磁盘/关键帧问题只影响它自己的文件。
+            deadline = time.monotonic() + 20
+            for key, rec in recorders.items():
+                try:
+                    rec.close(timeout=max(1.0, deadline - time.monotonic()))
+                except Exception as exc:
+                    _note_cleanup(status, f'{key} 录像收尾失败：{exc}')
         if own_runtime and runtime:
             try:
                 runtime.stop()
             except Exception as exc:
                 _cleanup_failed(status, str(exc))
         status['finished_at'] = time.time()
-        status['tracks'] = recorder.track_indices if recorder else {}
-        status['recorded_packets'] = recorder.written if recorder else 0
+        status['camera_files'] = {key: {
+            'video': f'{key}/video.mkv',
+            'records': f'{key}/inspection.json',
+            'packets': recorders[key].written if key in recorders else 0,
+        } for key in cameras}
+        status['recorded_packets'] = sum(rec.written for rec in recorders.values())
         status['processed_by_camera'] = counts
         # 收尾时拉流线程必然报"流已结束/正在重连"，那是我们自己停的，不该留在终态里。
         status['camera_errors'] = {}

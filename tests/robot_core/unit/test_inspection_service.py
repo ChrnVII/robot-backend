@@ -68,16 +68,29 @@ def test_failed_task_and_recovery(config):
     assert recovered.status('interrupted')['state'] == 'failed'
 
 
-def test_detection_page_reads_task_json(config):
+def test_detection_page_reads_per_camera_json(config):
     def run(_config, **kwargs):
-        Path(kwargs['output_directory'], 'inspection.json').write_text(json.dumps({'records': [{'frame_id': 1}, {'frame_id': 2}]}))
-        return dict(state='completed')
+        root = Path(kwargs['output_directory'])
+        for camera_id, frames in (('cam01', [1, 2]), ('cam02', [3])):
+            (root / camera_id).mkdir(parents=True, exist_ok=True)
+            (root / camera_id / 'inspection.json').write_text(json.dumps(
+                {'records': [{'frame_id': value} for value in frames]}))
+        return dict(state='completed', camera_ids=['cam01', 'cam02'])
     service = InspectionService(config, run)
-    service.start(dict(task_run_id='page'))
+    service.start(dict(task_run_id='page', camera_ids=['cam01', 'cam02']))
     wait(service)
-    page = service.detections('page', offset=1, limit=1)
-    assert page['total'] == 2
-    assert page['items'] == [{'frame_id': 2}]
+
+    single = service.detections('page', offset=1, limit=1, camera_id='cam01')
+    assert single == {'items': [{'frame_id': 2}], 'cameraId': 'cam01',
+                      'offset': 1, 'limit': 1, 'total': 2}
+
+    # 不指定相机：按相机顺序拼起来再分页
+    merged = service.detections('page', offset=1, limit=2)
+    assert merged['total'] == 3
+    assert [item['frame_id'] for item in merged['items']] == [2, 3]
+
+    # 跨文件的窗口不能串页
+    assert [item['frame_id'] for item in service.detections('page', offset=2, limit=1)['items']] == [3]
 
 
 def test_custom_selection(config):

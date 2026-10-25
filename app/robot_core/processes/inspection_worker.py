@@ -62,10 +62,12 @@ async def handle_inspection_request(service: InspectionService, request: dict) -
         task_run_id = request.get("task_run_id")
         return await asyncio.to_thread(service.status, str(task_run_id) if task_run_id else None)
     if operation == Op.TASK_DETECTIONS:
+        camera_id = request.get("camera_id")
         return await asyncio.to_thread(service.detections,
             str(request["task_run_id"]),
             offset=int(request.get("offset", 0)),
             limit=int(request.get("limit", 50)),
+            camera_id=str(camera_id) if camera_id else None,
         )
     raise ValueError("unsupported operation")
 

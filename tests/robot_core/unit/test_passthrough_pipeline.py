@@ -99,7 +99,7 @@ def test_engine_records_and_finalizes(tmp_path, monkeypatch, pipeline):
     result = engine.run(config_for(tmp_path), mode='single', task_run_id='test', duration_seconds=.8,
                         output_directory=tmp_path / 'result', pipeline=pipeline, inference_runtime=runtime)
     assert result['state'] == 'completed', result
-    value = json.loads((tmp_path / 'result' / 'inspection.json').read_text())
+    value = json.loads((tmp_path / 'result' / 'cam01' / 'inspection.json').read_text())
     records = value['records']
     if pipeline == 'inference':
         assert 1 <= len(records) <= 2
@@ -116,7 +116,7 @@ def test_engine_records_and_finalizes(tmp_path, monkeypatch, pipeline):
         assert all(r.decoded_frames == 0 for r in readers)
     assert bool(runtime.calls) == (pipeline == 'inference')
     assert all(not r.is_alive() for r in readers)
-    with av.open(str(tmp_path / 'result' / 'video.mkv')) as recorded:
+    with av.open(str(tmp_path / 'result' / 'cam01' / 'video.mkv')) as recorded:
         frames = list(recorded.decode(video=0))
         assert len(frames) == 12
         assert (frames[0].width, frames[0].height) == (128, 96)
@@ -132,9 +132,10 @@ def test_slow_cpu_keeps_all_eight_main_tracks(tmp_path, monkeypatch):
     assert all(count > 0 for count in result['processed_by_camera'].values())
     assert result['recorded_packets'] == 96
     assert all(not r.is_alive() for r in readers)
-    for index in range(8):
-        with av.open(str(tmp_path / 'result' / 'video.mkv')) as recorded:
-            assert len(list(recorded.decode(video=index))) == 12
+    for index in range(1, 9):
+        with av.open(str(tmp_path / 'result' / f'cam{index:02}' / 'video.mkv')) as recorded:
+            assert len(recorded.streams.video) == 1
+            assert len(list(recorded.decode(video=0))) == 12
     assert sum(s['overwritten_frames'] for s in result['camera_stats'].values()) > 0
 
 
@@ -148,14 +149,14 @@ def test_independent_reconnect_and_detection_timeline(tmp_path, monkeypatch, rol
     assert stats[role]['sessions'] == 2
     assert stats['sub' if role == 'main' else 'main']['sessions'] == 1
     assert all(not r.is_alive() for r in readers)
-    records = json.loads((tmp_path / 'result' / 'inspection.json').read_text())['records']
+    records = json.loads((tmp_path / 'result' / 'cam01' / 'inspection.json').read_text())['records']
     assert all(b['pts'] > a['pts'] for a, b in zip(records, records[1:]))
     if role == 'main':
         assert any(r['video_pts'] is None for r in records)
         assert any(r['session'] == 2 for r in records)
     else:
         assert any(r['detection_session'] == 2 for r in records)
-    with av.open(str(tmp_path / 'result' / 'video.mkv')) as recorded:
+    with av.open(str(tmp_path / 'result' / 'cam01' / 'video.mkv')) as recorded:
         frames = list(recorded.decode(video=0))
         assert len(frames) == (18 if role == 'main' else 12)
         assert all(b.pts > a.pts for a, b in zip(frames, frames[1:]))
@@ -197,7 +198,9 @@ def test_one_silent_camera_does_not_kill_the_task(tmp_path, monkeypatch):
     assert result['processed_by_camera']['cam03'] == 0
     assert all(result['processed_by_camera'][f'cam0{index}'] > 0 for index in (1, 2, 4))
     # 录像按剩下的三路收尾，而不是整场作废
-    assert set(result['tracks']) == {'cam01', 'cam02', 'cam04'}
+    assert set(result['camera_files']) == {'cam01', 'cam02', 'cam03', 'cam04'}
+    assert [result['camera_files'][key]['packets'] for key in ('cam01', 'cam02', 'cam04')].count(0) == 0
+    assert result['camera_files']['cam03']['packets'] == 0
     assert all(not reader.is_alive() for reader in readers)
 
 

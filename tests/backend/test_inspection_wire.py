@@ -41,4 +41,8 @@ def test_valid_legacy_payload_preserved(value):
 def test_worker_defaults_preserved():
     service = Mock()
     asyncio.run(handle_inspection_request(service, {"operation": Op.TASK_DETECTIONS, "task_run_id": "run"}))
-    service.detections.assert_called_once_with("run", offset=0, limit=50)
+    service.detections.assert_called_once_with("run", offset=0, limit=50, camera_id=None)
+    service.reset_mock()
+    asyncio.run(handle_inspection_request(service, {
+        "operation": Op.TASK_DETECTIONS, "task_run_id": "run", "camera_id": "cam02"}))
+    service.detections.assert_called_once_with("run", offset=0, limit=50, camera_id="cam02")

@@ -7,7 +7,7 @@ import asyncio
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.api.deps import get_inspection_service
-from app.api.validation import ensure_id
+from app.api.validation import ensure_camera_id, ensure_id
 from app.common.responses import ok, trace_of
 from app.common.local_folder import reveal_in_file_manager
 from app.schemas.inspection import StartInspectionRequest
@@ -51,10 +51,13 @@ async def inspection_detections(
     task_run_id: str,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
+    cameraId: str | None = Query(default=None, description="只读该路；缺省按相机顺序合并"),
     inspection: InspectionService = Depends(get_inspection_service),
 ) -> dict:
     ensure_id(task_run_id)
-    return ok(await inspection.detections(task_run_id, offset, limit), trace_of(request))
+    if cameraId is not None:
+        ensure_camera_id(cameraId)
+    return ok(await inspection.detections(task_run_id, offset, limit, cameraId), trace_of(request))
 
 
 @router.get("/inspections/{task_run_id}/results", tags=["inspection"])
@@ -63,10 +66,13 @@ async def inspection_results(
     task_run_id: str,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
+    cameraId: str | None = Query(default=None, description="只读该路；缺省按相机顺序合并"),
     inspection: InspectionService = Depends(get_inspection_service),
 ) -> dict:
     ensure_id(task_run_id)
-    return ok(await inspection.detections(task_run_id, offset, limit), trace_of(request))
+    if cameraId is not None:
+        ensure_camera_id(cameraId)
+    return ok(await inspection.detections(task_run_id, offset, limit, cameraId), trace_of(request))
 
 
 async def _task_directory(inspection, task_run_id):

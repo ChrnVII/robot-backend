@@ -114,7 +114,7 @@ uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml -
   并有并发上限（64）与请求/响应大小上限。应用关闭时经 `gateway.aclose()` 释放池。
 - **WS 推送中枢**（`api/ws/`）：同一主题共享一次快照 IPC，按 cameraId 隔离视频订阅；
   每个订阅者独立发送，队列只保留最新消息，慢客户端不会拖住其他客户端。
-- **巡检视频**：每路两条独立 RTSP 连接；主码流只转封装 MKV，子码流送浏览器预览，解码帧用最新槽位限频送推理。
+- **巡检视频**：每路两条独立 RTSP 连接；主码流只转封装成该路自己的 MKV，子码流送浏览器预览，解码帧用最新槽位限频送推理。
   inspection-worker.sock.video 为私有二进制 IPC，API 鉴权后代理到 /ws/inspections/{taskRunId}/cameras/{cameraId}。
   浏览器侧用 WebCodecs 硬解；逐帧证据图片不落盘，历史磁盘文件不会自动删除。
 - **事件驱动**：控制与感知进程在设备状态采样、命令完成、逐帧推理落库时于事务内
@@ -241,16 +241,21 @@ uv run pytest tests/robot_core   # 机器人内核（租约/安全/存储/巡检
 账号可由 INSPECTION_CAMERA_USERNAME / INSPECTION_CAMERA_PASSWORD 覆盖。
 
 结果根目录固定为后端项目的 data/cams，不接受前端提供路径。每次任务创建
-YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字符替换为下划线）：
+YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字符替换为下划线），
+任务下**每个摄像头一个子目录**，各路的录像与检测记录互不影响：
 
-- video.mkv：主码流原始视频转封装，每个摄像头一条独立视频轨道，轨道 title 为 cameraId。多轨 MKV 需在播放器选择轨道。
-- inspection.json：metadata 和完整 records（运行期只有 metadata + `records_total` + `records_complete=false`，
-  记录在 `.inspection.records` 只追加；任务结束后合并为完整 `records` 并置 `records_complete=true`）；每条记录包含 camera_id、src_pts（子码流原始 PTS，毫秒）、video_pts（录像位置估计，毫秒）、session（录像会话）、detection_session（子码流会话）、检测框及模型信息。
-  metadata.tracks 给出 cameraId 到实际 MKV 轨道索引的对应关系。
+- `<cameraId>/video.mkv`：该路主码流原始视频转封装，单文件单轨，轨道 title 为 cameraId，可直接播放不需要选轨。
+- `<cameraId>/inspection.json`：该路的 metadata 和完整 records（运行期只有 metadata + `records_total` + `records_complete=false`，
+  记录在 `<cameraId>/.inspection.records` 只追加；任务结束后合并为完整 `records` 并置 `records_complete=true`）。
+  每条记录包含 camera_id、src_pts（子码流原始 PTS，毫秒）、video_pts（录像位置估计，毫秒）、session（录像会话）、
+  detection_session（子码流会话）、检测框及模型信息。
   `video_time_basis=host_arrival_estimate` 明确表示按主机单调到达时钟关联，两条码流的源 PTS 不作相减；网络抖动、编码缓存会产生偏差，不保证逐帧同步。
   主码流尚未就绪、断线或时间锚点过旧时 video_pts/session 为 null，仍保留子码流检测结果。
   检测框 bbox_xyxy 使用子码流像素坐标，w/h 为子码流实际尺寸，recording_size 为主码流实际尺寸。
   同视野时可按尺寸比例映射；如果相机对子码流裁剪，必须另做标定，不能直接拉伸坐标。
+
+任务状态里的 `camera_files` 给出每路的 `video`/`records` 相对路径与该路写入的包数；
+`GET /inspections/{taskRunId}/detections?cameraId=cam01` 只读该路，缺省 `cameraId` 则按相机顺序合并后统一分页。
 
 CPU 调度：`inspection.capture_fps` 默认每路最多 2 次/秒，在 BGR 转换前限频；每路只存最新一帧，不追赶旧帧。
 每轮把**到期相机的最新帧合并成一次模型调用**（`inspection.inference_batch_size`，默认 4，1 表示关闭批量），
@@ -272,8 +277,8 @@ capture_fps 是检测频率上限，负载高时会自然降低；不会改变�
 `GET /inspections/{taskRunId}/detections` 对两种形态都做流式分页，内存占用与文件大小无关。
 断线后等待关键帧并在统一时间轴继续录像。编码参数变化、写盘积压（recorder/output 队列满或收尾超时）会把任务标记为失败。
 **单路故障只停该路**：某路主/子码流启动超时（默认 30 秒）、断流超过 `stream_stall_timeout_seconds`（默认 15 秒）
-或连续 3 次推理失败时，只把该路放进 `camera_disabled`（并把它剔除出本场 MKV 的轨道），其余各路继续检测与录像；
-码流恢复后该路自动回到检测与预览（录像轨道不可中途新增，故不回到录像）。只有全部路都不可用才失败：
+或连续 3 次推理失败时，只把该路放进 `camera_disabled`，其余各路的检测与录像不受影响；
+码流恢复后该路自动回到检测、预览与录像。只有全部路都不可用才失败：
 从未有一路就绪则立即失败，运行中全部掉线则给 `camera_all_failed_grace_seconds`（默认 60 秒，0 表示立即）的宽限期。
 
 “打开检测结果”调用 POST /api/v1/inspections/{taskRunId}/open，在后端所在主机的系统文件管理器中直接打开本次任务目录，与球形摄像页面共用目录打开实现。接口只接收任务编号，目录从任务状态解析并限定在 data/cams 下。

@@ -1,9 +1,10 @@
-"""One MKV, one original encoded track per camera, one disk owner thread."""
+"""One camera, one MKV, one original encoded track, one disk owner thread."""
 from __future__ import annotations
 import queue
 import threading
 import time
 from fractions import Fraction
+from pathlib import Path
 
 #: 收尾等待上限：磁盘挂起时不能把任务永远卡在 stopping。
 CLOSE_TIMEOUT_SECONDS = 30.0
@@ -19,11 +20,6 @@ class RecordingChannel:
         self._arrival_anchor = None
 
     def submit(self, packet, template):
-        # 被剔除出录像的路（启动超时/断流）直接跳过：MKV 轨道在开始编码后不能再
-        # 增删，剔除过就不参与这一场的录像。
-        is_blocked = getattr(self.owner, 'is_blocked', None)
-        if is_blocked is not None and is_blocked(self.camera_id):
-            return False
         arrived_at = time.monotonic()
         source = packet.dts if packet.dts is not None else packet.pts
         tb = packet.time_base or template.time_base
@@ -70,15 +66,20 @@ class RecordingChannel:
 
 
 class InspectionRecorder:
+    """把一路摄像头的主码流原始包转封装成一个单轨 MKV。
+
+    每个任务里每个摄像头各有一个实例（一个文件、一个写盘线程），互不影响：
+    某一路没收到关键帧只会让该路的 ``video.mkv`` 无法收尾，不影响其他路。
+    """
+
     def __init__(self, path, camera_ids, max_queue=2400):
         self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.camera_ids = list(camera_ids)
         self.started = time.monotonic()
         self.error = ''
         self.written = 0
         self.track_indices = {}
-        #: 被剔除出本场录像的相机（启动超时或断流），只用集合判成员，读写都在 GIL 下原子。
-        self.blocked: set[str] = set()
         self._queue = queue.Queue(maxsize=max_queue)
         self._thread = threading.Thread(target=self._run, name='inspection-mkv', daemon=True)
         self.channels = {key: RecordingChannel(self, key) for key in camera_ids}
@@ -88,31 +89,12 @@ class InspectionRecorder:
         if self.error:
             raise RuntimeError(self.error)
 
-    def is_blocked(self, camera_id) -> bool:
-        return camera_id in self.blocked
-
-    def drop_camera(self, camera_id):
-        """把一路摄像头剔除出本场录像，让其余各路继续录。
-
-        MKV 轨道必须在 ``start_encoding`` 之前建好，因此剔除是单向的：之后恢复的
-        摄像头回到检测与预览，但不回到录像。
-        """
-        if camera_id in self.blocked:
-            return False
-        self.blocked.add(camera_id)
-        # 主动叫醒写盘线程重算「还差几路」，否则流刚好停住时它会一直等包。
-        try:
-            self._queue.put_nowait(('drop', camera_id))
-        except queue.Full:
-            pass
-        return True
-
     def offer(self, item):
         self.check()
         try:
             self._queue.put_nowait(item)
         except queue.Full as exc:
-            self.error = '录像写盘积压，任务已停止'
+            self.error = '录像写盘积压，录像已停止'
             raise RuntimeError(self.error) from exc
 
     def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS):
@@ -148,13 +130,10 @@ class InspectionRecorder:
         self.written += 1
 
     def _start_if_ready(self, out, streams, pending):
-        """凑齐（未被剔除的）各路首包就开录；返回需要先写出去的积压包。"""
-        if not pending:
+        """收到该路首包就开录；返回需要先写出去的积压包。"""
+        if not pending or not self.camera_ids:
             return None
-        expected = len(self.camera_ids) - len(self.blocked)
-        if expected <= 0:
-            raise RuntimeError('没有可用的摄像头轨道，录像无法开始')
-        if len(streams) < expected:
+        if len(streams) < len(self.camera_ids):
             return None
         out.start_encoding()
         return pending
@@ -168,8 +147,8 @@ class InspectionRecorder:
             out = av.open(str(self.path), 'w', format='matroska')
             ready = False
             while True:
-                # 期望轨道数会随剔除变化，因此每轮都判断一次能否开录，
-                # 而不是等下一个数据包到达时才判断（此时队列可能已空）。
+                # 每轮都判断一次能否开录，而不是等下一个数据包到达时才判断
+                # （此时队列可能已空，barrier 会一直等不到 start_encoding）。
                 block = self._start_if_ready(out, streams, pending)
                 if block is not None:
                     ready = True
@@ -179,18 +158,12 @@ class InspectionRecorder:
                 item = self._queue.get()
                 if item is None:
                     if not ready:
-                        raise RuntimeError('未收到全部所选摄像头的关键帧，录像未就绪')
+                        raise RuntimeError('未收到关键帧，录像未就绪')
                     break
                 if item[0] == 'barrier':
                     item[1].set()
                     continue
-                if item[0] == 'drop':
-                    pending = [entry for entry in pending if entry[0] != item[1]]
-                    pending_bytes = sum(len(entry[1]) for entry in pending)
-                    continue
                 key, raw, pts, dts, duration, tb, is_key, template, origin, offset = item
-                if key in self.blocked:
-                    continue
                 signature = (template.codec_context.name, template.codec_context.width,
                              template.codec_context.height, bytes(template.codec_context.extradata or b''))
                 if key not in streams:

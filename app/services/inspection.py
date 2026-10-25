@@ -89,10 +89,15 @@ class InspectionService:
     async def status(self, task_run_id: str) -> dict:
         return camelize(await self._call({"operation": Op.TASK_STATUS, "task_run_id": task_run_id}))
 
-    async def detections(self, task_run_id: str, offset: int, limit: int) -> dict:
-        return camelize(await self._call({
-            "operation": Op.TASK_DETECTIONS, "task_run_id": task_run_id, "offset": offset, "limit": limit,
-        }))
+    async def detections(self, task_run_id: str, offset: int, limit: int,
+                         camera_id: str | None = None) -> dict:
+        payload: dict[str, Any] = {
+            "operation": Op.TASK_DETECTIONS, "task_run_id": task_run_id,
+            "offset": offset, "limit": limit,
+        }
+        if camera_id:
+            payload["camera_id"] = camera_id
+        return camelize(await self._call(payload))
 
 _RESULT_SQL = text(
     """
