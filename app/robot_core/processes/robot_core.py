@@ -13,12 +13,13 @@ from app.contracts import (
     LeaseReleaseWire,
     Op,
 )
+from app.common.deployment import ConfigurationError
 from app.robot_core.common.config import load_config
 from app.robot_core.contracts import DeviceCommand
 from app.robot_core.core import RobotCore
 from app.robot_core.devices import (
-    LegacyEnvironmentSensorDriver, NetworkCameraControlSettings, NetworkCameraDriver,
-    SimulatedDeviceDriver,
+    LegacyEnvironmentSensorDriver, ModbusSerialEnvironmentDriver,
+    NetworkCameraControlSettings, NetworkCameraDriver, SimulatedDeviceDriver,
 )
 from app.ipc import JsonSocketServer
 from app.robot_core.storage import PlatformStore
@@ -48,11 +49,21 @@ def build(config):
                     control[key] = camera[key]
         devices["camera"] = NetworkCameraDriver(NetworkCameraControlSettings.from_mapping(control))
         environment = config.values.get("devices", {}).get("environment", {})
-        devices["environment"] = LegacyEnvironmentSensorDriver(
-            base_url=str(environment.get("base_url", "http://127.0.0.1:9010")),
-            port_name=str(environment.get("port_name", "/dev/ttyS0")),
-            timeout_seconds=float(environment.get("timeout_seconds", 2.0)),
-        )
+        transport = str(environment.get("transport", "http")).strip().lower()
+        if transport == "serial":
+            # 串口直读：不依赖旧 Java 服务，但要求 /dev/ttyS0 独占（见 devices/README.md）。
+            devices["environment"] = ModbusSerialEnvironmentDriver.from_mapping(environment)
+        elif transport == "http":
+            # 旧链路：仅在旧 Java 服务仍在线时可用，保留它作为一键回滚通道。
+            devices["environment"] = LegacyEnvironmentSensorDriver(
+                base_url=str(environment.get("base_url", "http://127.0.0.1:9010")),
+                port_name=str(environment.get("port_name", "/dev/ttyS0")),
+                timeout_seconds=float(environment.get("timeout_seconds", 2.0)),
+            )
+        else:
+            raise ConfigurationError(
+                f"devices.environment.transport must be 'serial' or 'http', got {transport!r}"
+            )
     safety = config.values["safety"]
     core = RobotCore(store, devices, lease_ttl_ms=int(safety["lease_ttl_ms"]),
                      max_motion_distance_m=float(safety["max_motion_distance_m"]),

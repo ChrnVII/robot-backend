@@ -40,6 +40,9 @@ devices:
     timeout_margin_seconds: 5.0
     max_retries: 1
   environment:
+    # simulated 模式下 environment 由 SimulatedDeviceDriver 提供，此段不生效；
+    # 真实串口/HTTP 采集只在 runtime.mode=hardware 时启用（见 hardware.yaml）。
+    transport: http
     base_url: http://127.0.0.1:9010
     port_name: /dev/ttyS0
     poll_interval_seconds: 5

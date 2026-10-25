@@ -127,10 +127,44 @@ devices:
     timeout_margin_seconds: 5.0
     max_retries: 1
   environment:
-    base_url: http://127.0.0.1:9010
-    port_name: /dev/ttyS0
+    # 采集通道：serial = 新后端经 485 直读（不依赖旧 Java 服务）
+    #           http   = 旧链路（POST /sensorData/detectLtwy），仅在旧服务在线时可用，作回滚通道
+    transport: serial
+    port: /dev/ttyS0
+    baudrate: 9600
+    bytesize: 8
+    parity: N
+    stopbits: 1
+    timeout_seconds: 0.5
+    # 485 半双工：帧间必须留空，否则从站还没释放总线就发下一帧会丢包
+    frame_gap_ms: 50
+    max_retries: 1
     poll_interval_seconds: 5
-    timeout_seconds: 2
+    # 寄存器表：2026-10-23 真机抓帧确认（9600-8N1 / Modbus-RTU / FC03），
+    # 三帧请求与响应的 CRC 均已逐帧校验；缩放系数用旧面板读数反推验证。
+    sensors:
+      - slave: 12
+        label: 温湿度
+        register: 0x0000
+        count: 2
+        fields:
+          - { offset: 0, name: temperature_c,    scale: 0.1, unit: "℃" }
+          - { offset: 1, name: humidity_percent, scale: 0.1, unit: "%RH" }
+      - slave: 2
+        label: 光照
+        register: 0x0000
+        count: 1
+        fields:
+          - { offset: 0, name: illuminance_lux, scale: 1, unit: lux }
+      - slave: 3
+        label: 风速
+        register: 0x0063
+        count: 1
+        fields:
+          - { offset: 0, name: wind_speed_mps, scale: 0.1, unit: "m/s" }
+    # —— 回滚：把 transport 改成 http 并重启 robot-core，即恢复旧链路 ——
+    # base_url: http://127.0.0.1:9010
+    # port_name: /dev/ttyS0
 inspection:
   mode: single
   # Per-camera inference ceiling; preview and original recording keep source FPS.

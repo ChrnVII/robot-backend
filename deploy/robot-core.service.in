@@ -6,6 +6,8 @@ After=local-fs.target systemd-udev-settle.service
 Type=simple
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
+# /dev/ttyS0 属于 dialout；缺这一行串口直读会 Permission denied（环境数据拿不到）。
+SupplementaryGroups=dialout
 WorkingDirectory=__PROJECT_DIR__
 EnvironmentFile=-__PROJECT_DIR__/robot.env
 Environment=PYTHONUNBUFFERED=1
