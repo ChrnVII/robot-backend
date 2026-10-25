@@ -48,8 +48,17 @@ devices:
     timeout_seconds: 2
 inspection:
   mode: single
-  # Per-camera inference ceiling; preview and original recording keep source FPS.
+  # Fallback per-camera inference ceiling; profiles override it by camera count.
   capture_fps: 2
+  # Detection-rate tiers keep total inference calls per second roughly constant.
+  # Recording and preview always run at the source frame rate.
+  profiles:
+    - max_cameras: 1
+      capture_fps: 5
+    - max_cameras: 4
+      capture_fps: 2
+    - max_cameras: 8
+      capture_fps: 1
   # Frames from multiple cameras per model call (1 disables batching).
   inference_batch_size: 4
   decode_threads: 1

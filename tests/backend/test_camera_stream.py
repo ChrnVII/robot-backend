@@ -7,7 +7,7 @@
 2. **背压策略**：订阅者队列溢出后必须整体清空并只等关键帧重同步（FLAG_RST），
    这是「延迟不随时间增长」的核心保证；
 3. **降级路径**：未配置 RTSP 地址时服务不启动、WS 先发 error 再关闭，
-   前端据此回退到 JPEG 轮询 —— 保证没接摄像头时页面依然可用。
+   前端据此显示不可用原因 —— 保证没接摄像头时页面不会无声重连。
 """
 
 from __future__ import annotations
@@ -71,6 +71,49 @@ def test_annexb_round_trip_restores_start_codes():
     rebuilt = annexb(*nals)
     assert rebuilt.startswith(b"\x00\x00\x00\x01")
     assert split_annexb(rebuilt) == nals
+
+
+def _split_reference(data: bytes) -> list[bytes]:
+    """逐字节扫描的参考实现，用来比对 C 层 find 版本的行为。"""
+    if not data:
+        return []
+    starts = []
+    i, n = 0, len(data)
+    while i + 3 <= n:
+        if data[i] == 0 and data[i + 1] == 0:
+            if data[i + 2] == 1:
+                starts.append((i, 3))
+                i += 3
+                continue
+            if i + 4 <= n and data[i + 2] == 0 and data[i + 3] == 1:
+                starts.append((i, 4))
+                i += 4
+                continue
+        i += 1
+    out = []
+    for idx, (pos, code) in enumerate(starts):
+        end = starts[idx + 1][0] if idx + 1 < len(starts) else n
+        nal = data[pos + code:end]
+        if nal:
+            out.append(nal)
+    return out
+
+
+def test_split_annexb_matches_byte_scan_reference():
+    """起始码边界（连续 0、3/4 字节混用、载荷里出现 00 00 01）必须与旧实现一致。"""
+    import random
+
+    rng = random.Random(20261026)
+    cases = [b"", b"\x00", b"\x00\x00", b"\x00\x00\x01",
+             b"\x00\x00\x00\x01", b"\x00\x00\x01\x00\x00\x01"]
+    for _ in range(500):
+        parts = []
+        for _ in range(rng.randint(0, 6)):
+            parts.append(rng.choice([b"\x00\x00\x01", b"\x00\x00\x00\x01"]))
+            parts.append(bytes(rng.randrange(256) for _ in range(rng.randint(0, 16))))
+        cases.append(b"".join(parts))
+    for raw in cases:
+        assert split_annexb(raw) == _split_reference(raw), raw
 
 
 def test_nal_types_and_h264_codec_string():

@@ -287,6 +287,7 @@ class RtspStreamReader(threading.Thread):
             )
 
             preview_ready = False
+            preview_reset = False
             packet_times = {}
             try:
                 for packet in container.demux(stream):
@@ -324,18 +325,24 @@ class RtspStreamReader(threading.Thread):
 
                     # 关键帧重建成 VPS/SPS/PPS + IDR，保证浏览器任意时刻接入都能解码，
                     # 不必等设备重发参数集。
-                    if is_key:
-                        body = annexb(*(nal for nal in nals if not self._is_param_nal(nal)))
-                        payload = self._params() + body if body else raw
-                    else:
-                        payload = raw
-
-                    self._seq = (self._seq + 1) & 0xFFFFFFFF
-                    flags = FLAG_KEY if is_key else 0
+                    #
+                    # 没有订阅者时不拼包：pack_frame + 载荷拼接是纯内存拷贝，没人看
+                    # 就等于白做（8 路 25fps 下每秒上百次）。preview_ready 只决定
+                    # 「什么时候可以发」，与解码无关，因此仍在首个关键帧翻转。
                     if is_key and not preview_ready:
-                        flags |= FLAG_RST
                         preview_ready = True
-                    if preview_ready:
+                        preview_reset = True
+                    if preview_ready and self.broadcaster.client_count:
+                        if is_key:
+                            body = annexb(*(nal for nal in nals if not self._is_param_nal(nal)))
+                            payload = self._params() + body if body else raw
+                        else:
+                            payload = raw
+                        self._seq = (self._seq + 1) & 0xFFFFFFFF
+                        flags = FLAG_KEY if is_key else 0
+                        if is_key and preview_reset:
+                            flags |= FLAG_RST
+                            preview_reset = False
                         self.broadcaster.broadcast(pack_frame(flags, pts_ms, self._seq) + payload)
 
                     # 解码交给检测线程用；子码流很便宜，放这里可以不额外占一条 RTSP 连接。

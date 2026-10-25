@@ -288,3 +288,48 @@ def test_batches_frames_of_multiple_cameras(tmp_path, monkeypatch):
     # 多路到期帧合并成一次模型调用（CPU 下这是最大的吞吐收益来源）
     assert runtime.batches and max(runtime.batches) >= 2
     assert all(count > 0 for count in result['processed_by_camera'].values())
+
+
+PROFILES = [
+    {'max_cameras': 1, 'capture_fps': 5},
+    {'max_cameras': 4, 'capture_fps': 2},
+    {'max_cameras': 8, 'capture_fps': 1},
+]
+
+
+def test_profile_follows_camera_count(tmp_path):
+    settings = engine.inspection_settings(config_for(tmp_path, profiles=PROFILES))
+    assert engine.resolve_profile(settings, 1)['capture_fps'] == 5
+    assert engine.resolve_profile(settings, 2)['capture_fps'] == 2
+    assert engine.resolve_profile(settings, 4)['capture_fps'] == 2
+    assert engine.resolve_profile(settings, 5)['capture_fps'] == 1
+    assert engine.resolve_profile(settings, 8)['capture_fps'] == 1
+    # 超出表尾用最后一档，绝不回退到「每路都按满帧跑」
+    assert engine.resolve_profile(settings, 9)['capture_fps'] == 1
+
+
+def test_profile_table_is_optional(tmp_path):
+    settings = engine.inspection_settings(config_for(tmp_path, capture_fps=3))
+    assert engine.resolve_profile(settings, 8) == {'capture_fps': 3.0}
+
+
+@pytest.mark.parametrize('entry', [
+    {'max_cameras': 0, 'capture_fps': 1},
+    {'max_cameras': 2, 'capture_fps': 0},
+    {'max_cameras': 2, 'capture_fps': float('nan')},
+    {'max_cameras': 2, 'capture_fps': 120},
+    {'capture_fps': 1},
+    'not-a-mapping',
+])
+def test_invalid_profile_is_rejected(tmp_path, entry):
+    with pytest.raises(ValueError):
+        engine.inspection_settings(config_for(tmp_path, profiles=[entry]))
+
+
+def test_run_reports_applied_profile(tmp_path, monkeypatch):
+    setup_streams(tmp_path, monkeypatch)
+    result = engine.run(config_for(tmp_path, 4, profiles=PROFILES), mode='four', task_run_id='test',
+                        duration_seconds=1.2, output_directory=tmp_path / 'result',
+                        inference_runtime=Runtime())
+    assert result['state'] == 'completed', result
+    assert result['capture_fps'] == 2

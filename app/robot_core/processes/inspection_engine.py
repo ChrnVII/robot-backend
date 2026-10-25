@@ -96,6 +96,20 @@ def camera_url(values, *, detection=False):
     return f"rtsp://{auth}{values['host']}:{values.get('port', 554)}{path}"
 
 
+def _rate(container, key, default, prefix='inspection'):
+    """读取一个频率上限（>0 且 <=60），非法值直接报错而不是静默回落。"""
+    value = container.get(key, default)
+    if isinstance(value, bool):
+        raise ValueError(f'{prefix}.{key} must be a number')
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{prefix}.{key} must be a number') from None
+    if not math.isfinite(rate) or not 0 < rate <= 60:
+        raise ValueError(f'{prefix}.{key} must be > 0 and <= 60')
+    return rate
+
+
 def inspection_settings(config):
     settings = config.values.get('inspection', {})
     result = {}
@@ -120,7 +134,42 @@ def inspection_settings(config):
     if isinstance(batch, bool) or not isinstance(batch, int) or not 1 <= batch <= 8:
         raise ValueError('inspection.inference_batch_size must be an integer between 1 and 8')
     result['inference_batch_size'] = batch
+    result['profiles'] = _profiles(settings, result)
     return result
+
+
+def _profiles(settings, defaults):
+    """解析路数档位表；缺省为空列表，表示所有路数都用 capture_fps。"""
+    raw = settings.get('profiles') or []
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError('inspection.profiles must be a list')
+    profiles = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f'inspection.profiles[{index}] must be a mapping')
+        limit = entry.get('max_cameras')
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 64:
+            raise ValueError(f'inspection.profiles[{index}].max_cameras must be an integer between 1 and 64')
+        profiles.append(dict(
+            max_cameras=limit,
+            capture_fps=_rate(entry, 'capture_fps', defaults['capture_fps'], f'inspection.profiles[{index}]'),
+        ))
+    profiles.sort(key=lambda item: item['max_cameras'])
+    return profiles
+
+
+def resolve_profile(settings, camera_count):
+    """按实际路数选检测频率：第一个 ``max_cameras >= 路数`` 的档，都不满足时用最后一档。
+
+    档位只决定检测频率，不改录像与预览：主码流始终按源帧率全帧转封装，预览按源帧率绘制。
+    """
+    profiles = settings.get('profiles') or []
+    for profile in profiles:
+        if int(camera_count) <= profile['max_cameras']:
+            return profile
+    if profiles:
+        return profiles[-1]
+    return dict(capture_fps=settings['capture_fps'])
 
 
 def _cleanup_failed(status, message):
@@ -194,6 +243,9 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
         raise ValueError('pipeline must be inference or passthrough')
     cameras = _camera_config(config, mode, camera_ids)
     settings = inspection_settings(config)
+    # 检测频率随路数分档：路越多，单路检测频率越低，总推理量保持恒定。
+    profile = resolve_profile(settings, len(cameras))
+    capture_fps = profile['capture_fps']
     urls = {key: (camera_url(value), camera_url(value, detection=True)) for key, value in cameras.items()}
     directory = Path(output_directory) if output_directory else task_directory(config, task_name, task_run_id)
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,7 +256,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                   output_dir=str(directory), started_at=time.time(), camera_errors={})
     # camera_waiting 与 camera_errors 分开：前者只是"还没收到数据"，后者才是真实故障。
     status.update(camera_waiting={}, camera_disabled={}, camera_total=len(cameras) * 2, camera_ready=0)
-    status.update(recording_stream='main', detection_stream='sub', capture_fps=settings['capture_fps'],
+    status.update(recording_stream='main', detection_stream='sub', capture_fps=capture_fps,
                   video_time_basis='host_arrival_estimate', bbox_coordinate_space='substream_pixels')
     output = InspectionOutput(directory, status, cameras)
     #: 每路一个 recorder（一个单轨 MKV、一个写盘线程），互不影响。
@@ -378,7 +430,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                     stale_frames[key] += 1
                     continue
                 # Rate limit before expensive conversion/inference. Never catch up old work.
-                next_detection[key] = time.monotonic() + 1 / settings['capture_fps']
+                next_detection[key] = time.monotonic() + 1 / capture_fps
                 timing['track_index'] = recorders[key].track_indices.get(key)
                 image = frame.to_ndarray(format='bgr24')
                 counts[key] += 1

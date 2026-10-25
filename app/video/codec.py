@@ -101,22 +101,26 @@ def unpack_frame_header(raw: bytes) -> tuple[int, int, int]:
 
 
 def split_annexb(data: bytes) -> list[bytes]:
-    """按起始码切分 Annex-B 码流，返回**不含起始码**的 NAL 单元列表。"""
+    """按起始码切分 Annex-B 码流，返回**不含起始码**的 NAL 单元列表。
+
+    用 ``bytes.find`` 定位起始码：扫描落在 C 层，单帧开销与载荷长度基本无关。
+    逐字节的 Python 循环在子码流上每帧要几百微秒，多路叠加后会明显挤占 GIL。
+    """
     if not data:
         return []
     starts: list[tuple[int, int]] = []
     i, n = 0, len(data)
+    marker = b"\x00\x00\x01"
     while i + 3 <= n:
-        if data[i] == 0 and data[i + 1] == 0:
-            if data[i + 2] == 1:
-                starts.append((i, 3))
-                i += 3
-                continue
-            if i + 4 <= n and data[i + 2] == 0 and data[i + 3] == 1:
-                starts.append((i, 4))
-                i += 4
-                continue
-        i += 1
+        found = data.find(marker, i)
+        if found < 0:
+            break
+        # 起始码紧邻的前一个 0 属于 4 字节起始码，需一并切掉。
+        if found > 0 and data[found - 1] == 0:
+            starts.append((found - 1, 4))
+        else:
+            starts.append((found, 3))
+        i = found + 3
 
     out: list[bytes] = []
     for idx, (pos, start_code) in enumerate(starts):

@@ -257,13 +257,25 @@ YYYY.MM.DD.HHMMSS.ffffff-任务名/（Asia/Shanghai 时间，非法文件名字�
 任务状态里的 `camera_files` 给出每路的 `video`/`records` 相对路径与该路写入的包数；
 `GET /inspections/{taskRunId}/detections?cameraId=cam01` 只读该路，缺省 `cameraId` 则按相机顺序合并后统一分页。
 
-CPU 调度：`inspection.capture_fps` 默认每路最多 2 次/秒，在 BGR 转换前限频；每路只存最新一帧，不追赶旧帧。
+CPU 调度按**路数分档**：`inspection.profiles` 是一张上限表，实际路数落在哪一档就用哪一档，
+`inspection.capture_fps` 是表缺失时的兜底值。默认三档：
+
+| 路数 | 每路检测 | 总推理量 |
+| --- | --- | --- |
+| 1 | 5 fps | 5 次/秒 |
+| 2–4 | 2 fps | 4–8 次/秒 |
+| 5–8 | 1 fps | 5–8 次/秒 |
+
+检测在 BGR 转换前限频，每路只存最新一帧、不追赶旧帧；
 每轮把**到期相机的最新帧合并成一次模型调用**（`inspection.inference_batch_size`，默认 4，1 表示关闭批量），
 `HeatStressAdapter.predict_batch` 走 Ultralytics 的 `source=[...]`；适配器不支持批量时自动退化为逐帧。
 `max_frame_age_seconds` 默认 1 秒，过旧帧直接丢弃；子码流仍完整解码以维持 H.264/H.265 参考帧，不能随机丢压缩包。
 `decode_threads` 默认每路 1 个解码线程；`models.heat_stress.cpu_threads` 默认 4，且不超过可用逻辑 CPU 数减 2（最少 1），OpenCV 使用 1 个线程。
 passthrough 模式仅录像和子码流预览，不解码/推理，records 为空。
-capture_fps 是检测频率上限，负载高时会自然降低；不会改变录像和预览的源帧率。它不能保证 CPU 上 8 路 × 25 帧推理。
+档位是上限而不是保证：负载高时实际检测率会自然降低；录像始终按主码流源帧率全帧转封装，预览按子码流源帧率绘制，都不受档位影响。
+服务端逐帧转发：H.264/H.265 的 P 帧依赖前序帧，中途丢帧会让参考链断裂、画面花屏到下一个关键帧，
+真正的解码负载只能靠相机端降低子码流分辨率/帧率来减。
+无订阅者时拉流线程不拼包（帧头 + 载荷拼接跳过），省掉无人观看时的纯拷贝。
 `models.heat_stress.device`（hardware.yaml 里为 `${MODEL_DEVICE:-cpu}`）配置为非 CPU 时，加载模型前会自检
 `torch.cuda.is_available()` 与可见 GPU 数量，不满足直接报错退出，不会静默回落到 CPU 慢跑。
 建议在相机端将子码流设为 H.264、640×360 或 640×480、10–15 fps、约 1 秒一个关键帧，并用实际目标验证检测召回率；主码流可保持 25 fps。
