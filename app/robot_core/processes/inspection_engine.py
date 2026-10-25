@@ -134,6 +134,8 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
     status = dict(task_run_id=task_run_id, task_name=task_name, mode=mode, pipeline=pipeline, state='starting',
                   processed=0, positive=0, camera_ids=list(cameras), camera_count=len(cameras),
                   output_dir=str(directory), started_at=time.time(), camera_errors={})
+    # camera_waiting 与 camera_errors 分开：前者只是"还没收到数据"，后者才是真实故障。
+    status.update(camera_waiting={}, camera_total=len(cameras) * 2, camera_ready=0)
     status.update(recording_stream='main', detection_stream='sub', capture_fps=settings['capture_fps'],
                   video_time_basis='host_arrival_estimate', bbox_coordinate_space='substream_pixels')
     output = InspectionOutput(directory, status)
@@ -147,6 +149,7 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
     counts = dict.fromkeys(cameras, 0)
     next_detection = dict.fromkeys(cameras, 0.0)
     stale_frames = dict.fromkeys(cameras, 0)
+    stalled_since = {}
     last_status = 0
     try:
         if pipeline == 'inference' and own_runtime:
@@ -237,13 +240,27 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
                 status['processed'] += 1
                 status['positive'] += bool(result.get('detections'))
             if time.monotonic() - last_status >= .5:
-                status['camera_errors'] = {key: reader.last_error or reader.fatal
-                                          for key, reader in readers.items() if reader.last_error or reader.fatal}
+                # camera_errors 只放真实故障（拒绝连接/鉴权失败/路径不存在/断流），
+                # "还没收到数据"另放 camera_waiting 交给前端做"连接中"提示 ——
+                # 否则每次启动都要刷出一屏与故障同级的黄条，真正有问题的那路反而被淹没。
+                now = time.monotonic()
+                errors, waiting = {}, {}
                 for key, reader in readers.items():
+                    reason = reader.last_error or reader.fatal
+                    if reason:
+                        errors[key] = reason
+                        stalled_since.pop(key, None)
+                        continue
                     progress = (reader.last_recorded_at if reader.recorder is not None else
                                 reader.last_frame_at if reader.slot is not None else reader.last_packet_at)
-                    if not progress or time.monotonic() - progress > 2:
-                        status['camera_errors'].setdefault(key, '等待有效视频 / 正在重连')
+                    if progress and now - progress <= 2:
+                        stalled_since.pop(key, None)
+                        continue
+                    waiting[key] = round(now - stalled_since.setdefault(key, now), 1)
+                status['camera_errors'] = errors
+                status['camera_waiting'] = waiting
+                status['camera_total'] = len(readers)
+                status['camera_ready'] = len(readers) - len(errors) - len(waiting)
                 status['recorded_packets'] = recorder.written
                 status['camera_stats'] = {key: dict(main=main_readers[key].stats(), sub=sub_readers[key].stats(),
                     processed=counts[key], overwritten_frames=slots[key].dropped,
@@ -281,6 +298,9 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
         status['tracks'] = recorder.track_indices if recorder else {}
         status['recorded_packets'] = recorder.written if recorder else 0
         status['processed_by_camera'] = counts
+        # 收尾时拉流线程必然报"流已结束/正在重连"，那是我们自己停的，不该留在终态里。
+        status['camera_errors'] = {}
+        status['camera_waiting'] = {}
         status['camera_stats'] = {key: dict(main=main_readers[key].stats(), sub=sub_readers[key].stats(),
             processed=counts[key], overwritten_frames=slots[key].dropped,
             stale_frames=stale_frames[key]) for key in sub_readers}
