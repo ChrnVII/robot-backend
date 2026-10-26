@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from app.robot_core.common import parse_utc, utc_now
 from app.robot_core.contracts import DeviceCommand
 
@@ -11,9 +13,13 @@ class CommandRejected(RuntimeError):
 
 
 class SafetySupervisor:
-    def __init__(self, leases: LeaseManager, max_motion_distance_m: float = 2.0):
+    def __init__(self, leases: LeaseManager, max_motion_distance_m: float = 2.0,
+                 minimum_battery_percent: float = 0.0):
         self.leases = leases
         self.max_motion_distance_m = max_motion_distance_m
+        self.minimum_battery_percent = float(minimum_battery_percent or 0.0)
+        #: 由 RobotCore 注入，读缓存里的 battery 状态；返回 None 表示暂无读数。
+        self.battery_percent_provider: Optional[Callable[[], Optional[float]]] = None
         self.emergency = False
 
     def reset(self) -> None:
@@ -51,4 +57,27 @@ class SafetySupervisor:
             distance = abs(float(command.payload.get("distance_m", 0.0)))
             if distance > self.max_motion_distance_m:
                 raise CommandRejected("motion_limit_exceeded")
+        self._check_battery(command, is_stop)
+
+    def _check_battery(self, command: DeviceCommand, is_stop: bool) -> None:
+        """低电量拒绝新的运动动作。
+
+        只约束 motion/lift 的「启动」：停止永远放行，云台不受约束（云台耗电远小于
+        行走）。读不到电量时**不拦截**——BMS 未接或刚启动不该让整机无法操作，
+        这种情况由设备健康状态去暴露。
+        """
+        if self.minimum_battery_percent <= 0 or is_stop:
+            return
+        if command.target not in {"motion", "lift"}:
+            return
+        if command.action == "stop":
+            return
+        provider = self.battery_percent_provider
+        if provider is None:
+            return
+        percent = provider()
+        if percent is None:
+            return
+        if percent < self.minimum_battery_percent:
+            raise CommandRejected("battery_critical")
 

@@ -23,11 +23,14 @@ class RobotCore:
     """Owns device writers, control arbitration, safety checks, and command audit."""
 
     def __init__(self, store: PlatformStore, devices: Dict[str, DeviceDriver], *, lease_ttl_ms: int = 3000,
-                 max_motion_distance_m: float = 2.0, audit_directory: Path | None = None):
+                 max_motion_distance_m: float = 2.0, minimum_battery_percent: float = 0.0,
+                 audit_directory: Path | None = None):
         self.store = store
         self.devices = devices
         self.leases = LeaseManager(store, lease_ttl_ms)
-        self.safety = SafetySupervisor(self.leases, max_motion_distance_m)
+        self.safety = SafetySupervisor(self.leases, max_motion_distance_m, minimum_battery_percent)
+        # 低电量门禁读的是缓存里的 battery 状态，不额外占用串口。
+        self.safety.battery_percent_provider = self._battery_percent
         self.state = "booting"
         self._poll_task = None
         self._poll_interval_seconds = 5.0
@@ -41,6 +44,16 @@ class RobotCore:
     def _cache(self, state: DeviceState) -> None:
         self._states[state.device_id] = state
         self._received_at[state.device_id] = utc_now()
+
+    def _battery_percent(self) -> Optional[float]:
+        """缓存中的电量百分比；无读数（BMS 未接/未配置）返回 None。"""
+        state = self._states.get("battery")
+        if state is None:
+            return None
+        try:
+            return float(state.values.get("battery_percent"))
+        except (TypeError, ValueError):
+            return None
 
     async def _save_state(self, state: DeviceState) -> None:
         self._cache(state)

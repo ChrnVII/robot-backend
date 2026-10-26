@@ -18,7 +18,7 @@ from app.robot_core.common.config import load_config
 from app.robot_core.contracts import DeviceCommand
 from app.robot_core.core import RobotCore
 from app.robot_core.devices import (
-    LegacyEnvironmentSensorDriver, ModbusSerialEnvironmentDriver,
+    LegacyEnvironmentSensorDriver, ModbusSerialBatteryDriver, ModbusSerialEnvironmentDriver,
     NetworkCameraControlSettings, NetworkCameraDriver, SimulatedDeviceDriver,
 )
 from app.ipc import JsonSocketServer
@@ -64,9 +64,21 @@ def build(config):
             raise ConfigurationError(
                 f"devices.environment.transport must be 'serial' or 'http', got {transport!r}"
             )
+        battery = config.values.get("devices", {}).get("battery") or {}
+        if battery:
+            battery_transport = str(battery.get("transport", "serial")).strip().lower()
+            if battery_transport == "serial":
+                # 串口直读 BMS：接管旧程序原先独占的 /dev/ttyS5（见 battery_serial.py）。
+                devices["battery"] = ModbusSerialBatteryDriver.from_mapping(battery)
+            elif battery_transport != "simulated":
+                raise ConfigurationError(
+                    f"devices.battery.transport must be 'serial' or 'simulated', "
+                    f"got {battery_transport!r}"
+                )
     safety = config.values["safety"]
     core = RobotCore(store, devices, lease_ttl_ms=int(safety["lease_ttl_ms"]),
                      max_motion_distance_m=float(safety["max_motion_distance_m"]),
+                     minimum_battery_percent=float(safety.get("minimum_battery_percent", 0.0)),
                      audit_directory=config.path("storage", "media_root").parent / "emergency-audit")
     core._poll_interval_seconds = float(
         config.values.get("devices", {}).get("environment", {}).get("poll_interval_seconds", 5.0)
