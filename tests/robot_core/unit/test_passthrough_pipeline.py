@@ -333,3 +333,35 @@ def test_run_reports_applied_profile(tmp_path, monkeypatch):
                         inference_runtime=Runtime())
     assert result['state'] == 'completed', result
     assert result['capture_fps'] == 2
+
+
+def test_slow_inference_is_fair_across_cameras(tmp_path, monkeypatch):
+    """推理慢于节拍时调度必须轮转：不能让列表头部的路把尾部的路饿死。
+
+    8 路、节拍 0.125s、单批 4 帧 × 0.15s/帧 ≈ 0.6s —— 批处理周期远超节拍，
+    旧实现按固定顺序切片会让 cam05-cam08 永远轮不到（已检测恒为 0）。
+    """
+    setup_streams(tmp_path, monkeypatch)
+    result = engine.run(config_for(tmp_path, 8, capture_fps=8, max_frame_age_seconds=3),
+                        mode='eight', task_run_id='test', duration_seconds=2.6,
+                        output_directory=tmp_path / 'result', inference_runtime=Runtime(delay=0.15))
+    assert result['state'] == 'completed', result
+    processed = result['processed_by_camera']
+    assert len(processed) == 8
+    assert all(count > 0 for count in processed.values()), processed
+
+
+def test_slow_inference_is_fair_across_cameras(tmp_path, monkeypatch):
+    """推理慢于节拍时调度必须轮转：不能让列表头部的路把尾部的路饿死。
+
+    8 路、节拍 0.125s、单批 4 帧 × 0.15s/帧 ≈ 0.6s —— 批处理周期远超节拍，
+    旧实现按固定顺序切片会让 cam05-cam08 永远轮不到（已检测恒为 0）。
+    """
+    setup_streams(tmp_path, monkeypatch)
+    result = engine.run(config_for(tmp_path, 8, capture_fps=8, max_frame_age_seconds=3),
+                        mode='eight', task_run_id='test', duration_seconds=2.6,
+                        output_directory=tmp_path / 'result', inference_runtime=Runtime(delay=0.15))
+    assert result['state'] == 'completed', result
+    processed = result['processed_by_camera']
+    assert len(processed) == 8
+    assert all(count > 0 for count in processed.values()), processed

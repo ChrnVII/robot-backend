@@ -415,14 +415,20 @@ def run(config, *, mode, task_run_id, duration_seconds, headless=True, pipeline=
             consumed = False
             # ---------- 攒一批到期相机的最新帧，一次模型调用 ---------- #
             due = [key for key in active if now >= next_detection[key]]
+            # 谁等得最久谁先上车。若按固定相机顺序切片，推理慢于节拍时列表头部
+            # 的路永远先到期、永远占据批次，尾部的路会一直轮不到（表现为 8 路
+            # 只有前 batch_size 路出检测结果，其余路已检测恒为 0）。
+            due.sort(key=lambda key: next_detection[key])
             batch = []
-            for key in due[:batch_size]:
+            for key in due:
+                if len(batch) >= batch_size:
+                    break
                 if (stop_event is not None and stop_event.is_set()) or (
                         duration_seconds > 0 and time.monotonic() - started >= duration_seconds):
                     break
                 item = slots[key].take(timeout=0)
                 if item is None:
-                    continue
+                    continue          # 取不到帧不占批次名额，后面的路仍有机会上车
                 consumed = True
                 (frame, timing), pts, source_pts = item
                 if (time.monotonic() - timeline.monotonic_at(pts) > settings['max_frame_age_seconds'] or

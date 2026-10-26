@@ -268,6 +268,7 @@ CPU 调度按**路数分档**：`inspection.profiles` 是一张上限表，实�
 
 检测在 BGR 转换前限频，每路只存最新一帧、不追赶旧帧；
 每轮把**到期相机的最新帧合并成一次模型调用**（`inspection.inference_batch_size`，默认 4，1 表示关闭批量），
+到期路按**「等得最久优先」**进批次：推理慢于节拍时各路轮流被服务，不会出现只有前几路出结果、其余路已检测恒为 0。
 `HeatStressAdapter.predict_batch` 走 Ultralytics 的 `source=[...]`；适配器不支持批量时自动退化为逐帧。
 `max_frame_age_seconds` 默认 1 秒，过旧帧直接丢弃；子码流仍完整解码以维持 H.264/H.265 参考帧，不能随机丢压缩包。
 `decode_threads` 默认每路 1 个解码线程；`models.heat_stress.cpu_threads` 默认 4，且不超过可用逻辑 CPU 数减 2（最少 1），OpenCV 使用 1 个线程。
