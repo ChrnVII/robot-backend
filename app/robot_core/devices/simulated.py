@@ -10,8 +10,10 @@ class SimulatedDeviceDriver:
     def __init__(self, device_id: str, initial_values: Dict[str, Any] | None = None):
         self.device_id = device_id
         self.opened = False
+        # 模拟驱动不提供电量：编造一个常数（此前是 87%）会被前端当成真实读数，
+        # 且无法与「BMS 未接」区分。读不到就上报空值，页面显示横杠。
         self.values: Dict[str, Any] = initial_values or {
-            "moving": False, "position_m": 0.0, "battery_percent": 87.0,
+            "moving": False, "position_m": 0.0,
         }
 
     async def open(self) -> None:

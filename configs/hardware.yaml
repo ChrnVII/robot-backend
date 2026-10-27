@@ -167,7 +167,8 @@ devices:
     # port_name: /dev/ttyS0
   battery:
     # 采集通道：serial = 新后端经 485 直读 BMS（接管旧程序原先独占的 /dev/ttyS5）
-    #           simulated = 保留旧的模拟常量 87%，作回滚通道
+    #           simulated = 完全不读 BMS：电量上报空值，页面显示横杠。
+    #           模拟通道不再编造常数读数（旧版固定 87% 会被误当成真实电量）。
     transport: serial
     port: /dev/ttyS5
     baudrate: 9600

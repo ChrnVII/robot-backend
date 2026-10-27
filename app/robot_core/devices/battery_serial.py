@@ -2,8 +2,9 @@
 
 迁移背景：电量此前由旧程序 ``com.dust.icore.IcoreBatteryQl`` 经 ``/dev/ttyS5``
 读取，再通过 9000 端口的 Java 应用对外提供，9100 的 robot-gateway 只是代理。
-旧程序下线后整条链路失效，新后端的 ``battery`` 一直停在
-``SimulatedDeviceDriver`` 的常量 87%。本驱动直接接管 ``/dev/ttyS5``。
+旧程序下线后整条链路失效，新后端的 ``battery`` 只能由模拟驱动顶替（曾长期
+上报一个编造的常数）。本驱动直接接管 ``/dev/ttyS5``，模拟通道则不再提供任何
+电量读数——读不到就留空，让页面显示横杠而不是假数。
 
 寄存器表来自 2026-10-26 真机读帧（CRC 校验通过，且与旧程序反汇编出的
 ``ReadHoldingRegistersRequest(1, 0, 18)`` / ``(1, 0, 35)`` 一致）：

@@ -165,7 +165,7 @@ def write_sample_device_states(store: PlatformStore) -> None:
     ))
     store.upsert_device_state(DeviceState(
         "motion", HealthState.OK, sampled_at, "prototype",
-        {"moving": False, "position_m": 0.0, "battery_percent": 87.0},
+        {"moving": False, "position_m": 0.0},
     ))
 
 
