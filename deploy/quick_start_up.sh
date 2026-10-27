@@ -223,9 +223,17 @@ acquire_lock() {
   # 脚本自身互斥：两个 start 并发时，后到的直接退出，避免各写一份 pidfile。
   mkdir -p "$RUN_DIR"
   exec 9>>"$RUN_DIR/quick-start.lock"
-  if ! flock -n 9; then
-    die "另一个 quick_start_up.sh 正在执行（锁: $RUN_DIR/quick-start.lock），稍后重试"
+  if flock -n 9; then
+    return 0
   fi
+  # 锁拿不到，但占锁的可能是旧版本遗留的子进程（它们继承了 fd 9）。
+  # 只有当「确实还有另一个脚本实例在跑」时才拒绝，否则继续——不然会永久卡死。
+  local others
+  others="$(pgrep -f '(bash|sh) .*quick_start_up\.sh' 2>/dev/null | grep -vw "$$" | tr '\n' ' ' || true)"
+  if [ -n "$others" ]; then
+    die "另一个 quick_start_up.sh 正在执行 (pid=$others)，稍后重试"
+  fi
+  warn "$RUN_DIR/quick-start.lock 被遗留进程占用（当前没有脚本在跑），继续执行"
 }
 
 require_tools() {
@@ -297,7 +305,8 @@ start_component() {
     return
   fi
   ensure_not_foreign "$name"
-  nohup .venv/bin/python -m "$module" --config "$CONFIG" >> "$LOG_DIR/$name.log" 2>&1 &
+  # 9>&- 必不可少：否则子进程继承脚本的锁 fd，脚本退出后锁仍被服务代持，后续 stop 全被卡住。
+  nohup .venv/bin/python -m "$module" --config "$CONFIG" >> "$LOG_DIR/$name.log" 2>&1 9>&- &
   printf '%s' "$!" > "$RUN_DIR/$name.pid"
   assert_alive "$name"
   log "$name 已启动 (pid $(cat "$RUN_DIR/$name.pid"))，日志 $LOG_DIR/$name.log"
@@ -315,7 +324,7 @@ start_backend() {
     die "端口 $BACKEND_PORT 已被占用${pids:+（pid=$pids）}，拒绝重复启动；查占用者: sudo ss -ltnp 'sport = :$BACKEND_PORT'"
   fi
   nohup .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" \
-    >> "$LOG_DIR/backend.log" 2>&1 &
+    >> "$LOG_DIR/backend.log" 2>&1 9>&- &
   printf '%s' "$!" > "$RUN_DIR/backend.pid"
   assert_alive backend
   log "backend 已启动 (pid $(cat "$RUN_DIR/backend.pid"))，日志 $LOG_DIR/backend.log"
