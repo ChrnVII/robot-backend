@@ -4,10 +4,11 @@
 #
 # 用法:
 #   deploy/quick_start_up.sh start     启动全部（默认）
-#   deploy/quick_start_up.sh stop      停止全部
+#   deploy/quick_start_up.sh stop      停止全部（只停本脚本托管的进程）
+#   deploy/quick_start_up.sh stop --all   连同「进程在跑但没有 pidfile」的残留一起停
 #   deploy/quick_start_up.sh restart   重启
-#   deploy/quick_start_up.sh status    查看各组件状态
-#   deploy/quick_start_up.sh check     仅冒烟检查（配置 + PostgreSQL 连通）
+#   deploy/quick_start_up.sh status    查看各组件真实状态（含孤儿进程对账）
+#   deploy/quick_start_up.sh check     仅冒烟检查（配置 + PostgreSQL 连通 + 串口权限）
 #   deploy/quick_start_up.sh install   安装/刷新 systemd 单元并启动（按当前路径渲染）
 #
 # 环境变量:
@@ -15,6 +16,11 @@
 #   ROBOT_CONFIG     进程配置文件（默认 configs/hardware.yaml）
 #   BACKEND_PORT     后端端口（默认 8100）
 #   SERVICE_USER     systemd 服务用户（install 渲染时用，默认当前用户）
+#
+# 状态判定原则（v2）：pidfile 只是线索，不是结论。
+#   - pidfile 里的 PID 必须「活着 + 命令行对得上模块」，否则视为无效（防 PID 复用）；
+#   - start 启动前先确认没有同名进程 / 端口 / IPC 锁被占，否则直接拒绝，不再静默继续；
+#   - 就绪判定改为真实探活：robot-core 走一次 IPC health，backend 校验 coreStatus。
 
 set -euo pipefail
 
@@ -27,6 +33,13 @@ BACKEND_PORT="${BACKEND_PORT:-8100}"
 HEALTH_URL="http://127.0.0.1:${BACKEND_PORT}/healthz"
 LOG_DIR="logs"
 RUN_DIR="run"
+
+#: robot-core 在 <sock>.lock 上持 flock，抢不到就退出（见 app/ipc/json_socket.py）。
+CORE_LOCK="$RUN_DIR/robot-core.sock.lock"
+#: 组件顺序：停止时反序使用。
+COMPONENTS="robot_core sensor_worker inference_worker inspection_worker sync_agent backend"
+#: stop --all：连同「进程在跑但没有 pidfile」的残留一起停。默认只在显式传参时打开。
+FORCE_ALL=false
 
 log()  { printf '[quick-start] %s\n' "$*"; }
 warn() { printf '[quick-start] 警告: %s\n' "$*"; }
@@ -97,29 +110,193 @@ PY
   fi
 }
 
+warn_audio_deps() {
+  # start 只做软提示：开发阶段不该因为没插麦克风就拒绝启动控制链路。
+  .venv/bin/python -c 'import sounddevice' 2>/dev/null \
+    || warn "sounddevice 不可用（缺 libportaudio2 或 venv 未重建），录音相关功能会失败"
+}
+
+check_serial_access() {
+  # 串口直读（environment / battery）要求当前用户能读写设备节点。
+  # systemd 单元用 SupplementaryGroups=dialout 解决；本脚本继承调用者的组。
+  local port
+  for port in /dev/ttyS0 /dev/ttyS5; do
+    if [ ! -e "$port" ]; then
+      warn "$port 不存在，对应通道会一直是 unavailable（页面显示横杠）"
+    elif [ ! -r "$port" ] || [ ! -w "$port" ]; then
+      warn "$port 当前用户不可读写；若日志报 Permission denied，执行: sudo usermod -aG dialout $USER 后重新登录"
+    fi
+  done
+}
+
+# ------------------------------------------------------------------ 进程身份
+
+#: 组件 → 命令行里可识别的模块片段。pidfile 里记的 PID 必须能对上它。
+pattern_of() {
+  case "$1" in
+    backend) printf 'uvicorn app.main:app' ;;
+    robot_core|sensor_worker|inference_worker|inspection_worker|sync_agent)
+      printf 'app.robot_core.processes.%s' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+#: 该 PID 是否确实是「<组件> 的 python -m 进程」。命令行对不上就当它无效（PID 被复用）。
+#: 直接读 /proc/<pid>/cmdline（NUL 分隔），不受 ps 版本/格式影响。
+is_ours() {
+  local pid="$1" name="$2" args pattern
+  pattern="$(pattern_of "$name")"
+  args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  case "$args" in
+    *python*-m*"$pattern"*) return 0 ;;
+  esac
+  return 1
+}
+
+#: 进程是否还在运行。僵尸进程算「已死」——它只是等父进程回收，端口和串口都已释放。
+proc_alive() {
+  local stat state
+  stat="$(cat "/proc/$1/stat" 2>/dev/null || true)"
+  if [ -z "$stat" ]; then
+    return 1
+  fi
+  stat="${stat##*)}"   # 丢掉 "pid (comm)"，comm 里可能有空格或括号
+  stat="${stat# }"
+  state="${stat%% *}"
+  [ "$state" != "Z" ]
+}
+
 pid_of() {
-  local pidfile="$RUN_DIR/$1.pid" pid
+  local name="$1" pidfile="$RUN_DIR/$1.pid" pid
   [ -f "$pidfile" ] || return 1
-  pid="$(cat "$pidfile")"
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
+  proc_alive "$pid" || return 1
+  is_ours "$pid" "$name" || return 1
   printf '%s' "$pid"
 }
 
+#: 按命令行找同名进程（不依赖 pidfile）。输出空格分隔的 PID 列表。
+pids_by_name() {
+  local name="$1" pattern pid out=""
+  pattern="$(pattern_of "$name")"
+  for pid in $(pgrep -f -- "$pattern" 2>/dev/null || true); do
+    if proc_alive "$pid" && is_ours "$pid" "$name"; then
+      out="${out:+$out }$pid"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+proc_cwd() {
+  readlink "/proc/$1/cwd" 2>/dev/null || printf '?'
+}
+
+port_pids() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -ltnp "sport = :$BACKEND_PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+}
+
+#: 端口上是否已有监听者。不依赖 -p，普通用户也能用（看不到对方 PID 时仍能判定「被占」）。
+port_listening() {
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -ltn "sport = :$BACKEND_PORT" 2>/dev/null | grep -q LISTEN
+}
+
+#: 该 flock 文件当前是否空闲（能抢到锁 = 没有别的实例持锁）。
+lock_free() {
+  local lockfile="$1"
+  mkdir -p "$(dirname "$lockfile")"
+  exec 8>>"$lockfile"
+  if flock -n 8; then
+    exec 8>&-
+    return 0
+  fi
+  exec 8>&-
+  return 1
+}
+
+acquire_lock() {
+  # 脚本自身互斥：两个 start 并发时，后到的直接退出，避免各写一份 pidfile。
+  mkdir -p "$RUN_DIR"
+  exec 9>>"$RUN_DIR/quick-start.lock"
+  if ! flock -n 9; then
+    die "另一个 quick_start_up.sh 正在执行（锁: $RUN_DIR/quick-start.lock），稍后重试"
+  fi
+}
+
+require_tools() {
+  # 状态判定依赖这几个工具；缺了会让「孤儿检测」静默失效，所以宁可直接报错。
+  local tool missing=""
+  for tool in flock pgrep ss; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing="$missing $tool"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    die "缺少命令:$missing（Debian/Ubuntu: sudo apt install util-linux procps iproute2）"
+  fi
+}
+
+# ---------------------------------------------------------------- 启动前预检
+
+ensure_not_foreign() {
+  local name="$1" pids p
+  if [ -n "$(pid_of "$name" || true)" ]; then
+    return 0
+  fi
+  pids="$(pids_by_name "$name")"
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+  for p in $pids; do
+    warn "$name 存在本脚本未托管的进程 pid=$p（cwd=$(proc_cwd "$p")）"
+  done
+  die "$name 已有实例在运行但不在 $RUN_DIR/$name.pid；确认后执行: $0 stop --all"
+}
+
+preflight() {
+  local pids p name
+  # robot-core 已在跑（且 PID 对得上）时不做锁校验：start 是幂等的，重复执行只会跳过。
+  if [ -z "$(pid_of robot_core || true)" ] && ! lock_free "$CORE_LOCK"; then
+    die "$CORE_LOCK 被占用，说明已有 robot-core 在服务但不在 $RUN_DIR/robot_core.pid；先执行: $0 status"
+  fi
+  if port_listening; then
+    pids="$(port_pids)"
+    if [ -z "$(pid_of backend || true)" ]; then
+      for p in $pids; do
+        warn "端口 $BACKEND_PORT 已被 pid=$p 占用（cwd=$(proc_cwd "$p")）"
+      done
+      die "端口 $BACKEND_PORT 已被占用；确认后执行: $0 stop --all（查占用者: sudo ss -ltnp 'sport = :$BACKEND_PORT'）"
+    fi
+  fi
+  for name in robot_core inspection_worker sync_agent backend; do
+    ensure_not_foreign "$name"
+  done
+}
+
+# -------------------------------------------------------------------- 启动
+
 assert_alive() {
-  # 启动后稍候确认进程仍存活，捕获 import/配置错误导致的秒退
-  local name="$1" pid
-  sleep 0.3
-  if ! pid="$(pid_of "$name")"; then
+  # 只确认「进程没有秒退」；真正的就绪由 wait_for_core / wait_for_health 判定。
+  local name="$1"
+  sleep 1.5
+  if [ -z "$(pid_of "$name" || true)" ]; then
     die "$name 启动即退出，查看 $LOG_DIR/$name.log"
   fi
 }
 
 start_component() {
   local name="$1" module="$2" pid
-  if pid="$(pid_of "$name")"; then
-    warn "$name 已在运行 (pid $pid)，跳过"
+  pid="$(pid_of "$name" || true)"
+  if [ -n "$pid" ]; then
+    warn "$name 已在运行 (pid $pid)，跳过；要加载新代码请用: $0 restart"
     return
   fi
+  ensure_not_foreign "$name"
   nohup .venv/bin/python -m "$module" --config "$CONFIG" >> "$LOG_DIR/$name.log" 2>&1 &
   printf '%s' "$!" > "$RUN_DIR/$name.pid"
   assert_alive "$name"
@@ -127,10 +304,15 @@ start_component() {
 }
 
 start_backend() {
-  local pid
-  if pid="$(pid_of backend)"; then
-    warn "backend 已在运行 (pid $pid)，跳过"
+  local pid pids
+  pid="$(pid_of backend || true)"
+  if [ -n "$pid" ]; then
+    warn "backend 已在运行 (pid $pid)，跳过；要加载新代码请用: $0 restart"
     return
+  fi
+  if port_listening; then
+    pids="$(port_pids)"
+    die "端口 $BACKEND_PORT 已被占用${pids:+（pid=$pids）}，拒绝重复启动；查占用者: sudo ss -ltnp 'sport = :$BACKEND_PORT'"
   fi
   nohup .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" \
     >> "$LOG_DIR/backend.log" 2>&1 &
@@ -139,40 +321,110 @@ start_backend() {
   log "backend 已启动 (pid $(cat "$RUN_DIR/backend.pid"))，日志 $LOG_DIR/backend.log"
 }
 
-wait_for_socket() {
-  local i
-  for i in $(seq 1 40); do
-    if [ -S "$RUN_DIR/robot-core.sock" ]; then
-      log "robot-core socket 就绪"
+assert_stopped() {
+  # sensor-worker / inference-worker 必须真的退干净：inspection-worker 要接管它们的 socket，
+  # 端口/socket 还被占着就会「启动成功但链路是坏的」。
+  local name="$1" pids
+  pids="$(pids_by_name "$name")"
+  if [ -n "$pids" ]; then
+    die "$name 仍在运行 (pid=$pids)，inspection-worker 无法接管 socket；先执行: $0 stop --all"
+  fi
+}
+
+# ---------------------------------------------------------------- 就绪判定
+
+core_state() {
+  # 真去问一次 robot-core：能答上 health 才算就绪，socket 文件存在不算。
+  .venv/bin/python - "$RUN_DIR/robot-core.sock" <<'PY'
+import json, socket, sys
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(2.0)
+        client.connect(sys.argv[1])
+        client.sendall(json.dumps({"operation": "health"}).encode() + b"\n")
+        buffer = b""
+        while not buffer.endswith(b"\n"):
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+    reply = json.loads(buffer)
+except Exception:
+    sys.exit(1)
+if not reply.get("ok"):
+    sys.exit(1)
+print((reply.get("result") or {}).get("state", ""))
+PY
+}
+
+health_core_status() {
+  # 打印 healthz 的 coreStatus；只有等于 ok 才算通过（HTTP 200 在 core 挂掉时也会返回）。
+  .venv/bin/python - "$HEALTH_URL" <<'PY'
+import json, sys, urllib.request
+try:
+    with urllib.request.urlopen(sys.argv[1], timeout=3) as response:
+        payload = json.load(response)
+except Exception:
+    sys.exit(1)
+status = str((payload.get("data") or {}).get("coreStatus") or "")
+print(status)
+sys.exit(0 if status == "ok" else 1)
+PY
+}
+
+wait_for_core() {
+  local i state
+  # 硬件模式下 core.start() 要先 self_test 串口/相机，给足 30s。
+  for i in $(seq 1 60); do
+    if state="$(core_state)"; then
+      log "robot-core 就绪 (state=${state:-unknown})"
       return 0
+    fi
+    if [ -z "$(pid_of robot_core || true)" ]; then
+      die "robot-core 已退出（未能绑定 IPC），查看 $LOG_DIR/robot_core.log"
     fi
     sleep 0.5
   done
-  die "robot-core socket 20s 内未就绪，查看 $LOG_DIR/robot_core.log"
+  die "robot-core 30s 内未响应 IPC health，查看 $LOG_DIR/robot_core.log"
+}
+
+wait_for_paths() {
+  local name="$1"; shift
+  local i path missing
+  # inspection-worker 要先加载模型再绑定 socket，给足 30s。
+  for i in $(seq 1 60); do
+    missing=""
+    for path in "$@"; do
+      [ -S "$path" ] || missing="$missing $path"
+    done
+    if [ -z "$missing" ]; then
+      log "$name socket 就绪"
+      return 0
+    fi
+    if [ -z "$(pid_of "$name" || true)" ]; then
+      die "$name 已退出，查看 $LOG_DIR/$name.log"
+    fi
+    sleep 0.5
+  done
+  die "$name 的 socket 30s 内未就绪:$missing"
 }
 
 wait_for_health() {
-  local i
+  local i status
   for i in $(seq 1 30); do
-    if .venv/bin/python -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=3)" \
-        "$HEALTH_URL" >/dev/null 2>&1; then
-      log "healthz OK: $HEALTH_URL"
+    if status="$(health_core_status)"; then
+      log "healthz 就绪 (coreStatus=$status): $HEALTH_URL"
       return 0
+    fi
+    if [ -z "$(pid_of backend || true)" ]; then
+      die "backend 已退出，查看 $LOG_DIR/backend.log"
     fi
     sleep 0.5
   done
-  die "backend 健康检查 15s 未通过，查看 $LOG_DIR/backend.log"
+  die "backend 15s 内未就绪（coreStatus 非 ok），查看 $LOG_DIR/backend.log"
 }
 
-do_check() {
-  load_env
-  ensure_venv
-  check_audio_deps
-  mkdir -p "$LOG_DIR" data run
-  log "冒烟检查: robot-core --check（验证配置 + PostgreSQL 连通）"
-  .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
-  log "冒烟检查通过"
-}
+# ---------------------------------------------------------------- 数据库/配置
 
 prepare_database() {
   case "${ROBOT_AUTO_MIGRATE:-true}" in
@@ -186,19 +438,68 @@ sync_enabled() {
   .venv/bin/python -c 'import sys; from app.robot_core.common.config import load_config; sys.exit(0 if load_config(sys.argv[1]).sync_enabled else 1)' "$CONFIG"
 }
 
+# -------------------------------------------------------------------- 停止
+
 stop_component() {
-  local name="$1" pid i
-  if ! pid="$(pid_of "$name")"; then return; fi
-  kill "$pid" 2>/dev/null || true
-  for i in $(seq 1 80); do
-    if ! kill -0 "$pid" 2>/dev/null; then
+  local name="$1" pid i p pids killed="" alive
+  pid="$(pid_of "$name" || true)"
+  pids="$(pids_by_name "$name")"
+  if [ -z "$pid" ] && [ -z "$pids" ]; then
+    rm -f "$RUN_DIR/$name.pid"
+    return
+  fi
+
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    killed="$pid"
+  fi
+
+  for p in $pids; do
+    if [ "$p" = "$pid" ]; then
+      continue
+    fi
+    if [ "$FORCE_ALL" = true ]; then
+      warn "$name 停止未受管进程 pid=$p（cwd=$(proc_cwd "$p")）"
+      kill "$p" 2>/dev/null || true
+      killed="$killed $p"
+    else
+      # 不在 pidfile 里的进程不擅自杀：可能是别的终端/别的配置在跑的实例。
+      warn "$name 还有未受管进程 pid=$p（不在 $RUN_DIR/$name.pid）；确认后执行: $0 stop --all"
+    fi
+  done
+
+  if [ -z "$killed" ]; then
+    return
+  fi
+
+  for i in $(seq 1 60); do
+    alive=""
+    for p in $killed; do
+      if proc_alive "$p"; then
+        alive="$alive $p"
+      fi
+    done
+    if [ -z "$alive" ]; then
       rm -f "$RUN_DIR/$name.pid"
       log "$name 已停止"
       return
     fi
     sleep 0.5
   done
-  die "$name 未在 40 秒内退出，请查看日志后处理 (pid $pid)"
+  die "$name 未在 30 秒内退出:$alive"
+}
+
+# -------------------------------------------------------------------- 入口
+
+do_check() {
+  load_env
+  ensure_venv
+  check_audio_deps
+  check_serial_access
+  mkdir -p "$LOG_DIR" data run
+  log "冒烟检查: robot-core --check（验证配置 + PostgreSQL 连通；不打开串口/相机）"
+  .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
+  log "冒烟检查通过（硬件端口可用性需 start 后看 status / healthz）"
 }
 
 do_install() {
@@ -242,16 +543,22 @@ do_start() {
   load_env
   ensure_venv
   mkdir -p "$LOG_DIR" data run
+  preflight
+  warn_audio_deps
+  check_serial_access
   prepare_database
-  log "冒烟检查…"
+  log "冒烟检查…（只验配置 + 数据库，硬件端口在 start 后由探活确认）"
   .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
 
-  start_component robot_core        app.robot_core.processes.robot_core
-  wait_for_socket
+  start_component robot_core app.robot_core.processes.robot_core
+  wait_for_core
   stop_component sensor_worker
   stop_component inference_worker
+  assert_stopped sensor_worker
+  assert_stopped inference_worker
   start_component inspection_worker app.robot_core.processes.inspection_worker
-  # inspection-worker also serves sensor-worker.sock and owns the sole model.
+  # inspection-worker 同时提供 sensor-worker.sock 与 inspection-worker.sock，并独占模型。
+  wait_for_paths inspection_worker "$RUN_DIR/sensor-worker.sock" "$RUN_DIR/inspection-worker.sock"
   if sync_enabled; then
     start_component sync_agent app.robot_core.processes.sync_agent
   else
@@ -259,7 +566,8 @@ do_start() {
   fi
   start_backend
   wait_for_health
-  log "全部组件已启动。前端地址: http://<机器人IP>:${BACKEND_PORT}"
+  log "全部组件已启动（配置: $CONFIG）"
+  log "接口地址: http://<机器人IP>:${BACKEND_PORT}/api/v1　healthz: $HEALTH_URL"
 }
 
 do_stop() {
@@ -272,29 +580,65 @@ do_stop() {
 }
 
 do_status() {
-  local name pid
-  for name in robot_core sensor_worker inference_worker inspection_worker sync_agent backend; do
-    if pid="$(pid_of "$name")"; then
+  local name pid pids p state
+  for name in $COMPONENTS; do
+    pid="$(pid_of "$name" || true)"
+    if [ -n "$pid" ]; then
       printf '%-20s RUNNING (pid %s)\n' "$name" "$pid"
-    else
-      printf '%-20s STOPPED\n' "$name"
+      continue
     fi
+    pids="$(pids_by_name "$name")"
+    if [ -n "$pids" ]; then
+      printf '%-20s ORPHAN  (pid %s) 进程在跑但不受本脚本管理\n' "$name" "$pids"
+      for p in $pids; do
+        printf '%-20s         cwd=%s\n' '' "$(proc_cwd "$p")"
+      done
+      continue
+    fi
+    printf '%-20s STOPPED\n' "$name"
   done
-  if [ -x .venv/bin/python ] && .venv/bin/python -c \
-      "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=3)" \
-      "$HEALTH_URL" >/dev/null 2>&1; then
-    log "healthz OK: $HEALTH_URL"
+
+  pids="$(port_pids)"
+  if [ -n "$pids" ]; then
+    for p in $pids; do
+      log "端口 ${BACKEND_PORT} <- pid $p（cwd=$(proc_cwd "$p")）"
+    done
   else
-    warn "healthz 不可达: $HEALTH_URL"
+    warn "端口 ${BACKEND_PORT} 无人监听"
+  fi
+
+  if state="$(health_core_status)"; then
+    log "healthz OK (coreStatus=$state)"
+  else
+    warn "healthz 不就绪 (coreStatus=${state:-unreachable}): $HEALTH_URL"
+  fi
+
+  if [ -n "$(pids_by_name robot_core)" ] && [ -z "$(pid_of robot_core || true)" ]; then
+    warn "有 robot-core 在跑但不在 $RUN_DIR/robot_core.pid：\"$0 start\" 会拒绝启动，先 \"$0 stop --all\""
   fi
 }
 
-case "${1:-start}" in
+COMMAND="${1:-start}"
+case "${2:-}" in
+  --all) FORCE_ALL=true ;;
+  '') ;;
+  *) die "未知参数: ${2}（仅支持 --all）" ;;
+esac
+
+case "$COMMAND" in
+  start|stop|restart|status) require_tools ;;
+esac
+
+case "$COMMAND" in
+  start|stop|restart) acquire_lock ;;
+esac
+
+case "$COMMAND" in
   start)   do_start ;;
   stop)    do_stop ;;
   restart) do_stop; sleep 1; do_start ;;
   status)  do_status ;;
   check)   do_check ;;
   install) do_install ;;
-  *)       die "用法: $0 {start|stop|restart|status|check|install}" ;;
+  *)       die "用法: $0 {start|stop [--all]|restart|status|check|install}" ;;
 esac
