@@ -219,19 +219,40 @@ lock_free() {
   return 1
 }
 
+#: 该 PID 是不是本脚本（读 /proc/<pid>/cmdline）。不能用 pgrep 按脚本名判断：
+#: 命令替换会 fork 出与父进程命令行完全相同、但 PID 不同的子 shell，会被误算成另一个实例。
+is_script_pid() {
+  local args
+  args="$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null || true)"
+  case "$args" in
+    *quick_start_up.sh*) return 0 ;;
+  esac
+  return 1
+}
+
 acquire_lock() {
   # 脚本自身互斥：两个 start 并发时，后到的直接退出，避免各写一份 pidfile。
+  # 记录持有者 PID，用来区分「真有另一个实例」和「遗留进程代持 fd」。
+  local ownerfile="$RUN_DIR/quick-start.owner" owner i
   mkdir -p "$RUN_DIR"
   exec 9>>"$RUN_DIR/quick-start.lock"
   if flock -n 9; then
+    printf '%s\n' "$$" > "$ownerfile"
+    trap 'rm -f "$RUN_DIR/quick-start.owner"' EXIT
     return 0
   fi
-  # 锁拿不到，但占锁的可能是旧版本遗留的子进程（它们继承了 fd 9）。
-  # 只有当「确实还有另一个脚本实例在跑」时才拒绝，否则继续——不然会永久卡死。
-  local others
-  others="$(pgrep -f '(bash|sh) .*quick_start_up\.sh' 2>/dev/null | grep -vw "$$" | tr '\n' ' ' || true)"
-  if [ -n "$others" ]; then
-    die "另一个 quick_start_up.sh 正在执行 (pid=$others)，稍后重试"
+  # 拿不到锁：只有「记录里的 PID 还活着且确实是本脚本」才算真有并发实例；
+  # 否则就是遗留进程（历史上子进程继承锁 fd 导致）在代持，继续执行并给出提示。
+  owner=""
+  for i in $(seq 1 10); do
+    owner="$(cat "$ownerfile" 2>/dev/null || true)"
+    if [ -n "$owner" ]; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && is_script_pid "$owner"; then
+    die "另一个 quick_start_up.sh 正在执行 (pid=$owner)，稍后重试"
   fi
   warn "$RUN_DIR/quick-start.lock 被遗留进程占用（当前没有脚本在跑），继续执行"
 }
