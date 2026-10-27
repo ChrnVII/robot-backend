@@ -218,6 +218,15 @@ def parse_read_response(frame: bytes, slave: int, count: int) -> list[int]:
     ]
 
 
+def _as_int16(raw: int) -> int:
+    """把寄存器按 int16 有符号解释（BMS 电流/温度可为负）。
+
+    真机放电时电流寄存器返回 0xFFAC：按 uint16 读是 65452（→6545.2 A 这种
+    不可能的值），按 int16 有符号才是 -84（→-8.4 A）。
+    """
+    return raw - 0x10000 if raw >= 0x8000 else raw
+
+
 def decode_registers(registers: list[int], registers_map: BatteryRegisterMap,
                      soc_mode: str = "capacity") -> dict[str, Any]:
     """把原始寄存器翻译成业务字段。
@@ -227,7 +236,7 @@ def decode_registers(registers: list[int], registers_map: BatteryRegisterMap,
     相差不到 0.1 个百分点，见模块文档）。
     """
     voltage = registers[registers_map.voltage] / 100.0
-    current = registers[registers_map.current] / 10.0
+    current = _as_int16(registers[registers_map.current]) / 10.0
     remaining = registers[registers_map.remaining_capacity] / 100.0
     total = registers[registers_map.total_capacity] / 100.0
     cell_max = registers[registers_map.cell_voltage_max] / 1000.0
