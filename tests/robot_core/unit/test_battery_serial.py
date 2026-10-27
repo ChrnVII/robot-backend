@@ -157,6 +157,17 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(self.values["battery_percent"], 40.9)
         self.assertEqual(self.values["soc_register_percent"], 41)
 
+    def test_negative_current_is_decoded_as_int16(self):
+        # 放电时电流寄存器返回 0xFFAC：uint16 会读成 65452（=6545.2 A），
+        # int16 才是 -84（=-8.4 A）。
+        discharge = list(REAL_REGISTERS_35)
+        discharge[1] = 0xFFAC
+        values = decode_registers(discharge, self.registers, "capacity")
+        self.assertEqual(values["current_a"], -8.4)
+        # 同一帧里其它字段不能被符号扩展带偏
+        self.assertEqual(values["voltage_v"], 47.31)
+        self.assertEqual(values["battery_percent"], 40.9)
+
     def test_percent_from_register_when_configured(self):
         values = decode_registers(REAL_REGISTERS_35, self.registers, "register")
         self.assertEqual(values["battery_percent"], 41.0)
