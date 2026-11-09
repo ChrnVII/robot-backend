@@ -18,7 +18,9 @@ from .db import PostgresConnectionPool, is_postgres_target
 logger = logging.getLogger(__name__)
 
 # Compatibility version for diagnostics; Alembic is the sole migration owner.
-SCHEMA_VERSION = 8
+# 与 schema_revisions 的序号对齐：0003_mission_session=9、0004_alert_type=10。
+# 仅用于 migrate/seed 的输出，不参与校验（校验看 app.migrations.HEAD_REVISION）。
+SCHEMA_VERSION = 10
 
 #: PostgreSQL NOTIFY 通道（定义在共享契约核，后端 WS 事件监听订阅同一名称）。
 EVENTS_CHANNEL = Channels.EVENTS

@@ -11,12 +11,13 @@ class AlertService:
         self.store = store
 
     def create(self, *, trace_id: str, severity: str, message: str,
-               source_run_id: Optional[str] = None, evidence_asset_id: Optional[str] = None) -> str:
+               source_run_id: Optional[str] = None, evidence_asset_id: Optional[str] = None,
+               alert_type: Optional[str] = None) -> str:
         alert_id = new_id("alert")
         with self.store.connect() as connection:
             connection.execute(
-                "INSERT INTO alerts(alert_id,trace_id,source_run_id,severity,state,evidence_asset_id,message,created_at) VALUES (?,?,?,?,'open',?,?,?)",
-                (alert_id, trace_id, source_run_id, severity, evidence_asset_id, message, utc_now()),
+                "INSERT INTO alerts(alert_id,trace_id,source_run_id,severity,state,alert_type,evidence_asset_id,message,created_at) VALUES (?,?,?,?,'open',?,?,?,?)",
+                (alert_id, trace_id, source_run_id, severity, alert_type, evidence_asset_id, message, utc_now()),
             )
         return alert_id
 

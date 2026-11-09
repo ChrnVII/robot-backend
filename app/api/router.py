@@ -9,11 +9,13 @@
 from fastapi import APIRouter, Depends
 
 from app.api.endpoints import (
+    alerts,
     auth,
     cameras,
     control,
     inspection,
     media,
+    missions,
     robot,
     system,
     video,
@@ -33,6 +35,8 @@ protected.include_router(media.router, tags=["media"])
 protected.include_router(inspection.router, tags=["inspection"])
 protected.include_router(video.router, tags=["video"])
 protected.include_router(workbench.router, tags=["workbench"])
+protected.include_router(missions.router, tags=["missions"])
+protected.include_router(alerts.router, tags=["alerts"])
 api_router.include_router(protected, dependencies=[Depends(require_authentication)])
 
 root_router = APIRouter()

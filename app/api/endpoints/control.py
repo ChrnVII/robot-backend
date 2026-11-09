@@ -22,13 +22,22 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-async def _record_emergency_alert(workbench: WorkbenchService, reason: str) -> None:
+def _record_emergency_alert(reason: str) -> None:
+    """急停告警写入 alerts 表（后台任务，自带 session，不依赖请求线程的 Session）。"""
     try:
-        await run_in_threadpool(workbench.create_alert, "critical", f"机器人已执行急停：{reason}", "safety")
+        from app.db.database import get_session_factory
+        from app.services.alerts import AlertsService
+
+        with get_session_factory()() as db:
+            AlertsService(db).create_alert(
+                level="critical",
+                content=f"机器人已执行急停：{reason}",
+                alert_type="safety",
+            )
     except Exception:
         # The core's durable emergency audit is authoritative; an unavailable
         # UI database must not delay or invalidate an acknowledged stop.
-        logger.exception("emergency acknowledged; workbench alert write failed")
+        logger.exception("emergency acknowledged; alert write failed")
 
 
 @router.post("/control/leases", tags=["control"])
@@ -90,10 +99,9 @@ async def emergency_stop(
     body: EmergencyStopRequest,
     background_tasks: BackgroundTasks,
     control: ControlService = Depends(get_control_service),
-    workbench: WorkbenchService = Depends(get_workbench_service),
 ) -> dict:
     result = await control.emergency_stop(body)
-    background_tasks.add_task(_record_emergency_alert, workbench, body.reason)
+    background_tasks.add_task(_record_emergency_alert, body.reason)
     return ok(result, trace_of(request))
 
 

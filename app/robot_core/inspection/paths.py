@@ -23,7 +23,11 @@ def data_root(config):
 def task_directory(config, task_name, run_id):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', task_name).strip(' .')[:80] or '巡检'
     stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y.%m.%d.%H%M%S.%f')
-    return data_root(config) / 'cams' / f'{stamp}-{name}'
+    prefix = f'{stamp}-'
+    # ext4 文件名单项上限 255 字节：80 个汉字 + 时间戳会超限（NTFS 按字符计，本地测不出）
+    while name and len((prefix + name).encode('utf-8')) > 200:
+        name = name[:-1]
+    return data_root(config) / 'cams' / f'{prefix}{name or "巡检"}'
 
 
 def camera_directory(directory, camera_id):

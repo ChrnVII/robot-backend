@@ -26,6 +26,11 @@ from typing import Any, List, Mapping, Optional
 
 from app.contracts.errors import IpcErrorCode
 from app.robot_core.contracts import CaptureRequest, CaptureResult
+from app.common.audio_writers import (
+    ContinuousWavWriter,
+    RunningAudioStats,
+    SegmentedWavWriter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +213,107 @@ class SoundDeviceAudioProvider:
             raise AudioCaptureError("audio WAV encoding failed") from error
         logger.info("audio captured: %s", metrics)
         return CaptureResult(content=content, quality_state=quality_state, metrics=metrics)
+
+    # -- 任务型长录音（采集会话）------------------------------------------
+    def capture_stream(
+        self,
+        settings: AudioSettings,
+        *,
+        continuous_writer: ContinuousWavWriter | None = None,
+        segment_writer: SegmentedWavWriter | None = None,
+        stop_event: threading.Event | None = None,
+        max_duration_seconds: float | None = None,
+        flush_interval_seconds: float = 60.0,
+    ) -> dict[str, Any]:
+        """边读边写：同一块 PCM 分发给长录音与分段两个 writer，绝不重复开设备。
+
+        与 ``capture`` 的区别：
+        - 不把整段 PCM 攒进 ``chunks``，内存恒定（只有一块 + 统计量）；
+        - 不返回 WAV 字节，改为直接写入调用方给的 writer；
+        - 时长由 ``stop_event`` 或 ``max_duration_seconds`` 决定，而不是固定时长。
+
+        返回 ``{"metrics": {...}, "continuous": {...}|None, "segments": {...}|None}``。
+        writer 的 close 在这里统一收口，异常路径也会关闭，避免半截 WAV 一直占着句柄。
+        """
+        if continuous_writer is None and segment_writer is None:
+            raise AudioCaptureError("capture_stream needs at least one writer")
+
+        sd = self._load_sounddevice()
+        device, device_label = self._resolve_device(sd, settings.device)
+        block_frames = max(1, min(settings.block_frames, settings.sample_rate))
+        stats = RunningAudioStats()
+        started = time.monotonic()
+        last_flush = started
+        overflows = 0
+        stopped_by = "unknown"
+
+        try:
+            stream = sd.InputStream(
+                samplerate=settings.sample_rate,
+                channels=settings.channels,
+                dtype="int16",
+                device=device,
+                blocksize=block_frames,
+            )
+        except Exception as error:  # noqa: BLE001 - 驱动异常类型不稳定
+            raise AudioCaptureError(f"audio device unavailable ({device_label}): {error}") from error
+
+        result: dict[str, Any] = {"continuous": None, "segments": None}
+        try:
+            with stream:
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        stopped_by = "stop_event"
+                        break
+                    now = time.monotonic()
+                    if max_duration_seconds is not None and (now - started) >= max_duration_seconds:
+                        stopped_by = "max_duration"
+                        break
+                    try:
+                        data, overflowed = stream.read(block_frames)
+                    except Exception as error:  # noqa: BLE001
+                        raise AudioCaptureError(f"audio read failed ({device_label}): {error}") from error
+                    payload = _to_bytes(data)
+                    if not payload:
+                        stopped_by = "empty_read"
+                        break
+                    overflows += 1 if overflowed else 0
+
+                    # 同一块数据，三处消费；任一处抛错都要让整体失败，避免静默丢数据
+                    stats.update(payload)
+                    if continuous_writer is not None:
+                        continuous_writer.feed(payload)
+                    if segment_writer is not None:
+                        segment_writer.feed(payload)
+
+                    if now - last_flush >= flush_interval_seconds:
+                        if continuous_writer is not None:
+                            continuous_writer.flush()
+                        if segment_writer is not None:
+                            segment_writer.flush()
+                        last_flush = now
+        except AudioCaptureError:
+            raise
+        except Exception as error:  # noqa: BLE001
+            raise AudioCaptureError(f"audio stream failed ({device_label}): {error}") from error
+        finally:
+            # 收口优先：即使采集异常，也要把已写入的数据 close 成可播放文件
+            if continuous_writer is not None:
+                try:
+                    result["continuous"] = continuous_writer.close()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("continuous audio writer close failed: %s", error)
+            if segment_writer is not None:
+                try:
+                    result["segments"] = segment_writer.close()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("segment audio writer close failed: %s", error)
+
+        metrics = stats.metrics(settings.sample_rate, settings.channels)
+        metrics.update({"device": device_label, "overflows": overflows, "stoppedBy": stopped_by})
+        result["metrics"] = metrics
+        logger.info("audio stream finished: %s", metrics)
+        return result
 
     def _load_sounddevice(self) -> Any:
         if self._sounddevice is not None:

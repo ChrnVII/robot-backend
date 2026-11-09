@@ -114,44 +114,6 @@ def delete_run(
     return ok({"deleted": True}, trace_of(request))
 
 
-@router.get("/alerts", tags=["workbench"])
-def list_alerts(
-    request: Request,
-    page: int | None = Query(default=None, ge=1, description="页码从 1 开始；不传返回全量数组"),
-    pageSize: int | None = Query(default=None, ge=1, le=500, description="每页条数"),
-    keyword: str = Query(default="", description="按告警内容 / 告警 ID / 执行 ID 模糊搜索"),
-    level: str | None = Query(default=None, description="告警等级，缺省不过滤"),
-    status: str | None = Query(default=None, description="处理状态，缺省不过滤"),
-    service: WorkbenchService = Depends(get_workbench_service),
-) -> dict:
-    return ok(
-        service.list_alerts(
-            page=page, page_size=pageSize, keyword=keyword, level=level, status=status
-        ),
-        trace_of(request),
-    )
-
-
-@router.post("/alerts/{alert_id}", tags=["workbench"])
-def handle_alert(
-    request: Request,
-    alert_id: str,
-    body: dict[str, Any] | None = Body(default=None),
-    service: WorkbenchService = Depends(get_workbench_service),
-) -> dict:
-    return ok(service.handle_alert(alert_id, body), trace_of(request))
-
-
-@router.delete("/alerts/{alert_id}", tags=["workbench"])
-def delete_alert(
-    request: Request,
-    alert_id: str,
-    service: WorkbenchService = Depends(get_workbench_service),
-) -> dict:
-    service.delete_alert(alert_id)
-    return ok({"deleted": True}, trace_of(request))
-
-
 @router.get("/config", tags=["workbench"])
 def get_config(
     request: Request,

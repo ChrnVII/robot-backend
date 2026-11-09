@@ -9,7 +9,11 @@ from sqlalchemy.engine import Engine
 
 from app.common.dburl import require_postgres_url
 
-HEAD_REVISION = "0002_perception"
+#: 必须与 app/migrations/versions 里最新的 revision 保持一致。
+#: 这个常量是「生产不开自动迁移」时的唯一校验依据：写成旧值会让 check_database()
+#: 在库已经升到新版本时反过来判定版本不匹配，直接拒绝启动。
+#: 新增迁移时同步改这里，否则 ROBOT_AUTO_MIGRATE=false 的部署起不来。
+HEAD_REVISION = "0004_alert_type"
 
 
 def check_database(target: Engine | str) -> None:

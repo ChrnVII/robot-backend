@@ -17,9 +17,12 @@ from app.gateways.inspection_worker import InspectionWorkerGateway, create_inspe
 from app.gateways.robot_core import RobotCoreGateway, create_robot_core_gateway
 from app.gateways.sensor_worker import SensorWorkerGateway, create_sensor_worker_gateway
 from app.services.cameras import CameraDirectoryService
+from app.services.alerts import AlertsService
 from app.services.control import ControlService
 from app.services.inspection import InferenceQueryService, InspectionService
 from app.services.media import MediaLibraryService, MediaService
+from app.services.missions import MissionService
+from app.services.mission_runner import MissionRunner, get_mission_runner
 from app.services.robot import RobotService
 from app.services.workbench import WorkbenchService
 
@@ -83,3 +86,15 @@ def get_inference_query_service() -> InferenceQueryService:
 
 def get_workbench_service(session: Session = Depends(get_db)) -> WorkbenchService:
     return WorkbenchService(session, get_settings())
+
+
+def get_mission_service(session: Session = Depends(get_db)) -> MissionService:
+    return MissionService(session, get_camera_directory())
+
+
+def get_mission_runner_service(settings: Settings = Depends(get_settings)) -> MissionRunner:
+    return get_mission_runner(settings)
+
+
+def get_alerts_service(session: Session = Depends(get_db)) -> AlertsService:
+    return AlertsService(session)

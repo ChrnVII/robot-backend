@@ -85,6 +85,13 @@ async def lifespan(app: FastAPI):
             )
     finally:
         session.close()
+    # 进程重启后，上次遗留的排队/执行中运行标成 interrupted，避免界面显示"在跑"其实已死
+    try:
+        from app.services.mission_runner import get_mission_runner
+
+        get_mission_runner(settings).recover_stale()
+    except Exception as error:  # noqa: BLE001
+        logger.warning("mission runner recover failed: %s", error)
     listener = _start_event_listener(settings)
     # 球形摄像头低延迟预览：未配置 RTSP 地址时内部即降级为空操作。
     get_camera_stream_service().start(asyncio.get_running_loop())
@@ -94,7 +101,15 @@ async def lifespan(app: FastAPI):
         get_camera_stream_service().started,
     )
     yield
-    # 退出：停事件监听 → 停摄像头拉流 → 关推送订阅 → 释放网关 IPC 连接池 → 释放数据库引擎
+    # 退出：先让正在跑的采集会话收尾（关文件、写 manifest、落库），再拆其他资源。
+    # 采集线程是 daemon，跳过这一步会被 SIGTERM 直接砍断，产物与状态都残。
+    try:
+        from app.services.mission_runner import get_mission_runner
+
+        get_mission_runner(settings).shutdown()
+    except Exception as error:  # noqa: BLE001 - 退出路径不允许因清理失败而卡住
+        logger.warning("stopping mission sessions failed: %s", error)
+    # 停事件监听 → 停摄像头拉流 → 关推送订阅 → 释放网关 IPC 连接池 → 释放数据库引擎
     get_camera_stream_service().stop()
     reset_camera_stream_service()
     if listener is not None:
