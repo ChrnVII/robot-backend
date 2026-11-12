@@ -1,0 +1,30 @@
+# cloud-agent 配置示例。
+# 页面上的修改会写回这个文件；token 不在其中（见凭据目录）。
+
+# 云端地址。https:// 或 wss://host/ws/agent 都可以。
+server = "https://files.example.com"
+
+# 共享目录：任意绝对路径，只读。root 填 "/" 等于把整块盘交给云端的读取能力，
+# 部署时请自己确认这个范围是不是你想要的。
+root = "/srv/share"
+
+# 本机在云端显示的名字；不填则用 hostname。
+name = "robot-production-001"
+
+# 同时上传的分片数。3 是经验值：再高会让云端磁盘寻道成为瓶颈。
+max_concurrent_uploads = 3
+
+# 应用层心跳间隔（秒）。云端用它判断"这台设备还在线"。
+heartbeat_interval = 15.0
+
+# 自签证书的内网测试才设为 false。
+verify_tls = true
+
+# 日志级别：DEBUG / INFO / WARNING。
+log_level = "INFO"
+
+# 本地控制面 UDS。相对路径按进程工作目录解析，backend 读同一个地址。
+control_socket = "run/cloud-agent.sock"
+
+# 凭据目录。留空则默认 <项目>/.cloud-agent/（0600）。
+# state_dir = "/var/lib/robot/cloud-agent"

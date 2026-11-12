@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.common.config import Settings, get_settings
 from app.db.database import get_db
+from app.gateways.cloud_agent import CloudAgentGateway, create_cloud_agent_gateway
 from app.gateways.inspection_worker import InspectionWorkerGateway, create_inspection_worker_gateway
 from app.gateways.robot_core import RobotCoreGateway, create_robot_core_gateway
 from app.gateways.sensor_worker import SensorWorkerGateway, create_sensor_worker_gateway
@@ -44,6 +45,11 @@ def get_sensor_worker_gateway() -> SensorWorkerGateway:
 @lru_cache(maxsize=1)
 def get_inspection_worker_gateway() -> InspectionWorkerGateway:
     return create_inspection_worker_gateway(get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_cloud_agent_gateway() -> CloudAgentGateway:
+    return create_cloud_agent_gateway(get_settings())
 
 
 @lru_cache(maxsize=1)

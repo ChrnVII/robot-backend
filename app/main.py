@@ -54,6 +54,7 @@ async def _close_gateways() -> None:
         deps.get_robot_core_gateway,
         deps.get_sensor_worker_gateway,
         deps.get_inspection_worker_gateway,
+        deps.get_cloud_agent_gateway,
     ):
         try:
             gateway = factory()

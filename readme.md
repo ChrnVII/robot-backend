@@ -46,10 +46,11 @@ app/
     common/camera_http.py 相机 HTTP 基建（控制与采集共用：认证 / 脱敏）
     processes/            robot_core / sensor_worker / inference_worker / inspection_worker / sync_agent
                           （inspection_worker 的任务引擎为 inspection_engine.py）
+    cloud_agent/          云端接入进程（独立进程、共用本 venv；本地 UDS 控制面）
 configs/                  base.yaml / dev.yaml（模拟，本机 PostgreSQL）/ hardware.yaml（生产 PG+硬件）
 models/hs_detect/weights/ 热应激检测模型（best.pt，sha256 已配置）
-tests/                    backend（后端接口/契约/WS/鉴权）+ robot_core（单元/契约/集成）
-deploy/                   systemd 单元模板 + target；启动脚本；robot.env.example
+tests/                    backend（后端接口/契约/WS/鉴权）+ cloud_agent（协议/沙箱/上传/控制面）+ robot_core
+deploy/                   本地启动脚本 + robot.env.example（开发期不涉及系统托管）
 ```
 
 分层与依赖规则：`api → services → gateways → ipc →（UDS）→ robot_core 进程`；
@@ -162,7 +163,8 @@ DSN：后端 `ROBOT_DATABASE_URL`；控制、感知、同步分别支持
 
 ## 部署
 
-systemd（三进程 target，同步可选）方案见 [`deploy/README.md`](deploy/README.md)。
+开发期的启动/停止/检查见 [`deploy/README.md`](deploy/README.md)（只在项目目录内，
+不写 `/etc`、不使用 systemd）。服务托管方式等进入部署阶段再定。
 
 ### 前后端同机部署（要求）
 

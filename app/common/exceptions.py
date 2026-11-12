@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.common.responses import error_response, trace_of
 from app.contracts import IpcErrorCode, is_not_found_code
 from app.gateways.base import InspectionWorkerError, RobotCoreError, SensorWorkerError
+from app.gateways.cloud_agent import CloudAgentError
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,18 @@ def register_exception_handlers(app: FastAPI) -> None:
         else:
             status_code = 409
         return error_response(_snake_upper(exc.code), str(exc), status_code, trace_id=trace_of(request))
+
+    @app.exception_handler(CloudAgentError)
+    async def handle_cloud_agent(request: Request, exc: CloudAgentError):
+        if exc.code == "cloud_agent_unavailable":
+            status_code = 503
+        elif exc.code in ("invalid_config", "invalid_request", "unknown_op", "configuration"):
+            status_code = 400
+        else:
+            status_code = 409
+        return error_response(
+            _snake_upper(exc.code), str(exc), status_code, trace_id=trace_of(request)
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_error(request: Request, exc: StarletteHTTPException):

@@ -30,6 +30,7 @@ _CACHED_PROVIDERS = (
     "get_robot_core_gateway",
     "get_sensor_worker_gateway",
     "get_inspection_worker_gateway",
+    "get_cloud_agent_gateway",
     "get_robot_service",
     "get_control_service",
     "get_media_service",

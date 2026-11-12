@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# quick_start_up.sh —— 手动启动控制、感知与 FastAPI 三进程（同步可选）。
-# 调试/验证用；生产环境建议使用 systemd（deploy/*.service + inspection-robot.target）。
+# quick_start_up.sh —— 开发期本地启动：控制、感知、可选同步、cloud-agent、FastAPI。
+# 只操作本项目目录内的进程与 pidfile，不写 /etc、不碰 systemd、不改系统包。
 #
 # 用法:
 #   deploy/quick_start_up.sh start     启动全部（默认）
@@ -9,13 +9,16 @@
 #   deploy/quick_start_up.sh restart   重启
 #   deploy/quick_start_up.sh status    查看各组件真实状态（含孤儿进程对账）
 #   deploy/quick_start_up.sh check     仅冒烟检查（配置 + PostgreSQL 连通 + 串口权限）
-#   deploy/quick_start_up.sh install   安装/刷新 systemd 单元并启动（按当前路径渲染）
 #
 # 环境变量:
 #   ROBOT_ENV_FILE   凭据文件路径（默认 <项目根>/robot.env）
 #   ROBOT_CONFIG     进程配置文件（默认 configs/hardware.yaml）
 #   BACKEND_PORT     后端端口（默认 8100）
-#   SERVICE_USER     systemd 服务用户（install 渲染时用，默认当前用户）
+#   ROBOT_CLOUD_AGENT_ENABLED  true|false（默认 true；false 时不启动 cloud-agent）
+#   ROBOT_CLOUD_AGENT_CONFIG   cloud-agent 配置（默认 configs/cloud-agent.toml）
+#
+# 所有 Python 进程共用同一个 .venv：cloud-agent 已并入 app/cloud_agent，
+# 一次 uv sync 装齐依赖，用 `python -m app.cloud_agent` 作为独立进程启动。
 #
 # 状态判定原则（v2）：pidfile 只是线索，不是结论。
 #   - pidfile 里的 PID 必须「活着 + 命令行对得上模块」，否则视为无效（防 PID 复用）；
@@ -36,8 +39,8 @@ RUN_DIR="run"
 
 #: robot-core 在 <sock>.lock 上持 flock，抢不到就退出（见 app/ipc/json_socket.py）。
 CORE_LOCK="$RUN_DIR/robot-core.sock.lock"
-#: 组件顺序：停止时反序使用。
-COMPONENTS="robot_core sensor_worker inference_worker inspection_worker sync_agent backend"
+#: 组件顺序：停止时反序使用。cloud-agent 与 backend 共用 .venv。
+COMPONENTS="robot_core sensor_worker inference_worker inspection_worker sync_agent cloud_agent backend"
 #: stop --all：连同「进程在跑但没有 pidfile」的残留一起停。默认只在显式传参时打开。
 FORCE_ALL=false
 
@@ -80,6 +83,18 @@ ensure_venv() {
   [ -x .venv/bin/python ] || die ".venv/bin/python 仍不可用，请检查 uv sync 输出"
 }
 
+# ------------------------------------------------ cloud-agent（同 venv）
+#
+# 已并入 app/cloud_agent：与 backend 共用一个 .venv，但作为独立进程运行。
+# 没有独立依赖要装，也没有目录探测；只保留一个显式开关。
+
+cloud_agent_wanted() {
+  case "${ROBOT_CLOUD_AGENT_ENABLED:-true}" in
+    false|False|FALSE|off|OFF|0|no|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 check_audio_deps() {
   # 麦克风采集的系统依赖：libportaudio2（sounddevice 运行时必需，PyPI wheel 不带）
   # 与 alsa-utils（amixer/arecord，启动预检与增益固化用）。
@@ -87,13 +102,8 @@ check_audio_deps() {
   ldconfig -p 2>/dev/null | grep -qi libportaudio || missing+=(libportaudio2)
   command -v amixer >/dev/null 2>&1 || missing+=(alsa-utils)
   if [ "${#missing[@]}" -gt 0 ]; then
-    if command -v apt-get >/dev/null 2>&1 && [ "${ROBOT_SKIP_APT:-false}" != "true" ]; then
-      warn "缺少系统依赖: ${missing[*]}，尝试 apt 安装…"
-      sudo apt-get update -qq || true
-      sudo apt-get install -y "${missing[@]}" || die "apt 安装失败，请手动执行: sudo apt install ${missing[*]}"
-    else
-      die "缺少系统依赖: ${missing[*]}，请手动执行: sudo apt install ${missing[*]}"
-    fi
+    # 开发期只提示，不调用 apt：这个脚本不修改系统包。
+    die "缺少系统依赖: ${missing[*]}，请手动执行: sudo apt install ${missing[*]}"
   fi
   .venv/bin/python -c 'import sounddevice' 2>/dev/null \
     || die "sounddevice 无法加载（通常仍是 libportaudio2 未装或 .venv 未重建）"
@@ -118,7 +128,7 @@ warn_audio_deps() {
 
 check_serial_access() {
   # 串口直读（environment / battery）要求当前用户能读写设备节点。
-  # systemd 单元用 SupplementaryGroups=dialout 解决；本脚本继承调用者的组。
+  # 串口权限由调用者所在的组决定；需要时手动执行: sudo usermod -aG dialout $USER
   local port
   for port in /dev/ttyS0 /dev/ttyS5; do
     if [ ! -e "$port" ]; then
@@ -135,6 +145,7 @@ check_serial_access() {
 pattern_of() {
   case "$1" in
     backend) printf 'uvicorn app.main:app' ;;
+    cloud_agent) printf 'app.cloud_agent' ;;
     robot_core|sensor_worker|inference_worker|inspection_worker|sync_agent)
       printf 'app.robot_core.processes.%s' "$1" ;;
     *) printf '%s' "$1" ;;
@@ -305,6 +316,9 @@ preflight() {
   for name in robot_core inspection_worker sync_agent backend; do
     ensure_not_foreign "$name"
   done
+  if cloud_agent_wanted; then
+    ensure_not_foreign cloud_agent
+  fi
 }
 
 # -------------------------------------------------------------------- 启动
@@ -349,6 +363,47 @@ start_backend() {
   printf '%s' "$!" > "$RUN_DIR/backend.pid"
   assert_alive backend
   log "backend 已启动 (pid $(cat "$RUN_DIR/backend.pid"))，日志 $LOG_DIR/backend.log"
+}
+
+start_cloud_agent() {
+  local pid i socket="${ROBOT_CLOUD_AGENT_SOCKET:-$RUN_DIR/cloud-agent.sock}" args=(-m app.cloud_agent)
+  local config_file="${ROBOT_CLOUD_AGENT_CONFIG:-configs/cloud-agent.toml}"
+  if ! cloud_agent_wanted; then
+    log "ROBOT_CLOUD_AGENT_ENABLED=false，跳过 cloud-agent"
+    return
+  fi
+
+  pid="$(pid_of cloud_agent || true)"
+  if [ -n "$pid" ]; then
+    warn "cloud_agent 已在运行 (pid $pid)，跳过；要加载新代码请用: $0 restart"
+    return
+  fi
+  ensure_not_foreign cloud_agent
+
+  [ -f "$config_file" ] && args+=(--config "$config_file")
+
+  # 与 backend 共用 .venv；工作目录固定在项目根，control_socket 默认
+  # run/cloud-agent.sock 与 backend 的 ROBOT_CLOUD_AGENT_SOCKET 指向同一路径。
+  nohup .venv/bin/python "${args[@]}" \
+    >> "$LOG_DIR/cloud_agent.log" 2>&1 9>&- &
+  printf '%s' "$!" > "$RUN_DIR/cloud_agent.pid"
+
+  # 云端接入不是本地业务的必要条件：起不来只告警，不阻断后端启动。
+  sleep 1.5
+  if [ -z "$(pid_of cloud_agent || true)" ]; then
+    rm -f "$RUN_DIR/cloud_agent.pid"
+    warn "cloud-agent 启动即退出，页面会显示「未运行」；查看 $LOG_DIR/cloud_agent.log"
+    return
+  fi
+  for i in $(seq 1 10); do
+    [ -S "$socket" ] && break
+    sleep 0.5
+  done
+  if [ -S "$socket" ]; then
+    log "cloud_agent 已启动 (pid $(cat "$RUN_DIR/cloud_agent.pid"))，控制面 $socket，日志 $LOG_DIR/cloud_agent.log"
+  else
+    warn "cloud_agent 已启动但控制面 socket 未就绪（$socket）；backend 页面会显示不可达，查看 $LOG_DIR/cloud_agent.log"
+  fi
 }
 
 assert_stopped() {
@@ -529,44 +584,16 @@ do_check() {
   mkdir -p "$LOG_DIR" data run
   log "冒烟检查: robot-core --check（验证配置 + PostgreSQL 连通；不打开串口/相机）"
   .venv/bin/python -m app.robot_core.processes.robot_core --config "$CONFIG" --check
-  log "冒烟检查通过（硬件端口可用性需 start 后看 status / healthz）"
-}
-
-do_install() {
-  # 渲染 systemd 单元模板（按当前目录/用户/端口）→ /etc/systemd/system 并启动。
-  # 项目挪位置、换用户、换端口后，重新执行一次本命令即可。
-  if [ ! -f "$ENV_FILE" ]; then
-    die "未找到 $ENV_FILE：请先 cp robot.env.example robot.env 并填写"
-  fi
-  load_env
-  ensure_venv
-  check_audio_deps
-  mkdir -p "$LOG_DIR" data run
-  prepare_database
-  local service_user="${SERVICE_USER:-${SUDO_USER:-$USER}}" staged
-  staged="$(mktemp -d)"
-  local amixer_bin
-  amixer_bin="$(command -v amixer || printf '/usr/bin/amixer')"
-  for unit in deploy/*.service.in; do
-    sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
-        -e "s|__SERVICE_USER__|$service_user|g" \
-        -e "s|__BACKEND_PORT__|$BACKEND_PORT|g" \
-        -e "s|__BIN_AMIXER__|$amixer_bin|g" \
-        "$unit" > "$staged/$(basename "$unit" .in)"
-  done
-  sudo cp "$staged"/*.service deploy/inspection-robot.target /etc/systemd/system/
-  rm -rf "$staged"
-  sudo systemctl daemon-reload
-  sudo systemctl disable --now sensor-worker.service inference-worker.service || true
-  sudo systemctl enable --now inspection-robot.target \
-    || warn "启动失败，查看: journalctl -u backend -e"
-  sudo systemctl restart robot-core.service inspection-worker.service backend.service
-  if sync_enabled; then
-    sudo systemctl enable --now sync-agent.service
+  if cloud_agent_wanted; then
+    if .venv/bin/python -c 'import app.cloud_agent' 2>/dev/null; then
+      log "冒烟检查: cloud-agent 可导入（配置: ${ROBOT_CLOUD_AGENT_CONFIG:-configs/cloud-agent.toml}）"
+    else
+      warn "cloud-agent 导入失败；确认当前 .venv 已 uv sync"
+    fi
   else
-    sudo systemctl disable --now sync-agent.service || true
+    log "ROBOT_CLOUD_AGENT_ENABLED=false，跳过 cloud-agent 检查"
   fi
-  log "systemd 单元已按 $PROJECT_DIR 渲染并启动（服务用户: $service_user）"
+  log "冒烟检查通过（硬件端口可用性需 start 后看 status / healthz）"
 }
 
 do_start() {
@@ -594,6 +621,7 @@ do_start() {
   else
     stop_component sync_agent
   fi
+  start_cloud_agent
   start_backend
   wait_for_health
   log "全部组件已启动（配置: $CONFIG）"
@@ -603,7 +631,7 @@ do_start() {
 do_stop() {
   local name
   # 与启动相反的顺序停止
-  for name in backend sync_agent inspection_worker inference_worker sensor_worker robot_core; do
+  for name in backend cloud_agent sync_agent inspection_worker inference_worker sensor_worker robot_core; do
     stop_component "$name"
   done
   rm -f "$RUN_DIR"/*.pid
@@ -669,6 +697,5 @@ case "$COMMAND" in
   restart) do_stop; sleep 1; do_start ;;
   status)  do_status ;;
   check)   do_check ;;
-  install) do_install ;;
-  *)       die "用法: $0 {start|stop [--all]|restart|status|check|install}" ;;
+  *)       die "用法: $0 {start|stop [--all]|restart|status|check}" ;;
 esac

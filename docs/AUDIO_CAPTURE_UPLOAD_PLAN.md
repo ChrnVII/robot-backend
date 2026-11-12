@@ -1,5 +1,9 @@
 # 声音采集优化与音频上云方案（鸡群异常声检测）
 
+> **注意（2026-11）**：本文写于部署形态定为 systemd 的阶段。当前开发期不写 `/etc`、
+> 不使用 systemd，启动/停止统一走 `deploy/quick_start_up.sh`；文中涉及单元模板与
+> `install` 的部分视为历史方案，不再执行。音频采集与上云设计本身仍然有效。
+
 > **基线工程**：`E:/xunjian/robot-backend`（FastAPI 后端 + robot_core 五进程，纯 Python 单体）+ `E:/xunjian/robot-frontend`
 > **部署形态**：**裸机 systemd（已确定，不使用镜像）**
 > 状态：方案定稿待实现 · 复核日期 2026-10-16

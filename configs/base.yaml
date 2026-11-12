@@ -72,7 +72,7 @@ inspection:
 storage:
   backend: postgresql
   # Local PostgreSQL; deployments provide ROBOT_DB_PASSWORD through the
-  # environment or systemd credentials.
+  # environment (robot.env).
   database_url: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
   database: postgresql+psycopg://robot:${ROBOT_DB_PASSWORD:-robot}@127.0.0.1:5432/robot_platform
   pool:

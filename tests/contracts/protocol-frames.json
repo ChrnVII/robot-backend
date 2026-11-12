@@ -1,0 +1,186 @@
+{
+  "_comment": "线上协议的黄金样例。server 与 agent 的测试都读这一份，各自的解析/序列化结果必须与它一致。改协议时先改这里，再改两端——两边不一致会立刻红。本文件只是测试夹具，不参与任何构建，也不会被装进任何包。",
+  "protocol_version": 1,
+  "max_frame_bytes": 262144,
+  "frames": [
+    {
+      "name": "command_list_dir",
+      "description": "A 下发列目录，带游标与上限",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "c9f1a2b3d4e5f607",
+        "command": "list_dir",
+        "payload": {
+          "rel": "docs/2026",
+          "cursor": "200",
+          "limit": 200
+        },
+        "ts": 1761033600.1
+      }
+    },
+    {
+      "name": "command_start_upload",
+      "description": "派发上传任务，字段较多",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "a1b2c3d4e5f60718",
+        "command": "start_upload",
+        "payload": {
+          "upload_id": "70a1643781b0490e90fcaed6fea392e7",
+          "rel": "bigfile.bin",
+          "filename": "bigfile.bin",
+          "total_size": 6291456,
+          "chunk_size": 1048576,
+          "total_chunks": 6,
+          "resume": true
+        },
+        "ts": 1761033601.0
+      }
+    },
+    {
+      "name": "result_ok",
+      "description": "指令成功结果，不带 command/error 字段",
+      "frame": {
+        "v": 1,
+        "type": "result",
+        "id": "c9f1a2b3d4e5f607",
+        "ok": true,
+        "payload": {
+          "path": "docs/2026",
+          "entries": [],
+          "total": 0,
+          "next_cursor": null
+        },
+        "ts": 1761033600.6
+      }
+    },
+    {
+      "name": "result_error",
+      "description": "指令失败结果，带 code 与可读消息；payload 为空对象（线上始终带这个字段）",
+      "frame": {
+        "v": 1,
+        "type": "result",
+        "id": "c9f1a2b3d4e5f607",
+        "ok": false,
+        "error": {
+          "code": "forbidden",
+          "message": "path escapes root: '../etc/passwd'"
+        },
+        "ts": 1761033600.7,
+        "payload": {}
+      }
+    },
+    {
+      "name": "hello",
+      "description": "B 注册，带根目录与平台信息",
+      "frame": {
+        "v": 1,
+        "type": "hello",
+        "id": "b0b1b2b3b4b5b6b7",
+        "agent_id": "b-office",
+        "payload": {
+          "hostname": "desk-01",
+          "os": "linux",
+          "agent_version": "0.1.0",
+          "roots": [
+            "/srv/share"
+          ],
+          "protocol": 1
+        },
+        "ts": 1761033599.5
+      }
+    },
+    {
+      "name": "welcome_with_resume",
+      "description": "A 回 welcome，带上未完成的上传清单",
+      "frame": {
+        "v": 1,
+        "type": "ack",
+        "id": "d1d2d3d4d5d6d7d8",
+        "payload": {
+          "server_time": 1761033602.0,
+          "protocol": 1,
+          "heartbeat_interval": 15.0,
+          "resume_uploads": [
+            {
+              "upload_id": "70a1643781b0490e90fcaed6fea392e7",
+              "rel": "bigfile.bin",
+              "filename": "bigfile.bin",
+              "total_size": 6291456,
+              "chunk_size": 1048576,
+              "total_chunks": 6,
+              "resume": true
+            }
+          ],
+          "agent_id": "b-office"
+        },
+        "ts": 1761033602.0
+      }
+    },
+    {
+      "name": "heartbeat_event",
+      "description": "B 应用层心跳；A 靠它判断业务在线",
+      "frame": {
+        "v": 1,
+        "type": "event",
+        "id": "e1e2e3e4e5e6e7e8",
+        "payload": {
+          "kind": "heartbeat",
+          "ts": 1761033615.0,
+          "active_uploads": 1
+        },
+        "ts": 1761033615.0
+      }
+    },
+    {
+      "name": "upload_failed_event",
+      "description": "B 上报上传失败，带错误码",
+      "frame": {
+        "v": 1,
+        "type": "event",
+        "id": "f1f2f3f4f5f6f7f8",
+        "payload": {
+          "kind": "upload_failed",
+          "upload_id": "70a1643781b0490e90fcaed6fea392e7",
+          "code": "size_changed",
+          "message": "文件在上传过程中被修改：6291456 → 7340032 字节"
+        },
+        "ts": 1761033620.0
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "name": "unsupported_version",
+      "frame": {
+        "v": 2,
+        "type": "command",
+        "id": "x",
+        "command": "ping"
+      },
+      "error_contains": "unsupported protocol version"
+    },
+    {
+      "name": "unknown_field",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "x",
+        "command": "ping",
+        "unexpected": 1
+      },
+      "error_contains": "invalid frame"
+    },
+    {
+      "name": "not_an_object",
+      "frame": [
+        1,
+        2,
+        3
+      ],
+      "error_contains": "must be a json object"
+    }
+  ]
+}

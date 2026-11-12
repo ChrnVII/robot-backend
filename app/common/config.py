@@ -1,7 +1,7 @@
 """应用配置（pydantic-settings）。
 
 环境变量前缀 ROBOT_，例如 ROBOT_CORS_ORIGINS、ROBOT_ENVIRONMENT、ROBOT_DATABASE_URL。
-凭据不进入代码与仓库（沿用旧平台约定：systemd credentials / 环境变量注入）。
+凭据不进入代码与仓库（由环境变量或 robot.env 注入）。
 """
 
 from functools import lru_cache
@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     sensor_worker_timeout: float = 65.0
     inspection_worker_socket: str = "run/inspection-worker.sock"
     inspection_worker_timeout: float = 10.0
+    # cloud-agent（云端接入进程）的本地控制面。留空不影响 backend 启动：
+    # 页面会显示「云端接入未运行」，本地业务完全不受影响。
+    cloud_agent_socket: str = "run/cloud-agent.sock"
+    cloud_agent_timeout: float = 5.0
 
     # 后端业务库（用户 / 任务 / 告警 / 报告 / 工作台数据，以及只读的检测结果；
     # PostgreSQL DSN）。生产与 robot-core 共用同一个 robot_platform 库，

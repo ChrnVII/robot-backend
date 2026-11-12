@@ -8,6 +8,8 @@ __pycache__/
 # 本地环境、运行数据与凭据
 .venv/
 .env
+.cloud-agent/
+configs/cloud-agent.toml
 
 data/
 run/

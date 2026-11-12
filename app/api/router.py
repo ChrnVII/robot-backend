@@ -12,6 +12,7 @@ from app.api.endpoints import (
     alerts,
     auth,
     cameras,
+    cloud_link,
     control,
     inspection,
     media,
@@ -37,6 +38,7 @@ protected.include_router(video.router, tags=["video"])
 protected.include_router(workbench.router, tags=["workbench"])
 protected.include_router(missions.router, tags=["missions"])
 protected.include_router(alerts.router, tags=["alerts"])
+protected.include_router(cloud_link.router, tags=["cloud-link"])
 api_router.include_router(protected, dependencies=[Depends(require_authentication)])
 
 root_router = APIRouter()

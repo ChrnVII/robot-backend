@@ -1,6 +1,6 @@
 """日志配置。
 
-统一使用标准库 logging；生产环境由 systemd/journald 收集，日志不写敏感凭据。
+统一使用标准库 logging；日志写 stdout/stderr，由运行环境收集，不写敏感凭据。
 """
 
 import logging

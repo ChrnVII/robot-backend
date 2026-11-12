@@ -1,107 +1,100 @@
-# 部署说明（纯 Python 技术栈）
+# 本地运行说明（开发阶段）
 
-目标布局（Linux 工控机；**项目可放任意目录、取任意名字**，下文以 `<项目>` 代指）：
+当前只在项目目录内启动/停止进程，**不写 `/etc`、不使用 systemd、不改系统包**。
+工控机上的服务托管方式等进入部署阶段再定。
+
+目录布局（Linux；项目可放任意目录、取任意名字，下文以 `<项目>` 代指）：
 
 ```text
 <项目>/                            # backend/ 内容整体
-  robot.env                       # 凭据与后端环境变量（cp robot.env.example robot.env，勿提交）
+  robot.env                       # 凭据与环境变量（cp robot.env.example robot.env，勿提交）
   .venv/                          # uv sync 生成（开发机复制来的会自动重建）
-  app/                            # FastAPI 后端 + robot_core 运行时
-  configs/hardware.yaml           # 生产配置（PostgreSQL + 硬件设备）
+  app/                            # FastAPI 后端 + robot_core 运行时 + cloud_agent
+  configs/hardware.yaml           # 硬件与数据库配置
+  configs/cloud-agent.toml        # 云端接入配置（首次在页面上保存时生成）
   data/  run/  logs/              # 运行数据 / UDS socket / 日志（运行时生成）
 ```
 
-## 前置准备（机器人上一次性）
+## 前置准备
 
 ```bash
 # 1) 安装 uv（Python 与依赖管理器；已装可跳过）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2) PostgreSQL：创建业务库与账号（对应 configs/hardware.yaml 的 DSN；
-#    若端口/主机不同，同步修改 hardware.yaml 的 storage.database_url）
+# 2) PostgreSQL：创建业务库与账号（对应 configs/hardware.yaml 的 DSN）
 sudo -u postgres psql -c "CREATE ROLE robot LOGIN PASSWORD '<ROBOT_DB_PASSWORD>';"
 sudo -u postgres psql -c "CREATE DATABASE robot_platform OWNER robot;"
 
-# 3) 代码就位：backend/ 整个目录放到任意位置（如 ~/robot、/srv/robot、/opt/robot）
-# 4) 凭据：cd <项目> && cp robot.env.example robot.env，填写后 chmod 600 robot.env
+# 3) 凭据：项目根执行
+cp robot.env.example robot.env && chmod 600 robot.env
 ```
 
-说明：拷入的 `.venv/` 若不是在本机 Linux 上创建（例如从其他平台复制），机器人上不可用，
-`uv sync` 会自动重建；若提示环境不兼容，先 `rm -rf .venv` 再同步。运行期不依赖 uv
-（systemd 直接调用 `.venv/bin/python`）。
+`.venv` 若不是在本机 Linux 创建（例如从其他平台复制），`uv sync` 会自动重建；
+若提示环境不兼容，先 `rm -rf .venv` 再同步。运行期不依赖 uv。
 
-## systemd（推荐，生产）
-
-```bash
-# 0) 代码放任意目录（示例 ~/robot），并完成「前置准备」
-cd ~/robot
-
-# 1) 凭据
-cp robot.env.example robot.env       # 填写密码/密钥（含 CAMERA_PASSWORD），chmod 600 robot.env
-
-# 2) 安装并启动（一条命令，自动完成：uv sync 全量依赖、创建 data/run/logs、
-#    按「当前目录 + 当前用户 + 端口」渲染 systemd 单元、装入 /etc/systemd/system 并启动）
-deploy/quick_start_up.sh install
-
-# 3) 检查
-systemctl status inspection-robot.target
-curl -s http://127.0.0.1:8100/healthz
-.venv/bin/python -m app.robot_core.processes.robot_core --config configs/hardware.yaml --check
-```
-
-- 单元文件是**模板**（`deploy/*.service.in`），`install` 时按当前目录、当前用户
-  （可用 `SERVICE_USER=` 覆盖）与端口渲染后装入系统；**项目挪位置后重跑一次
-  `install` 即可**，代码更新同理。
-- 模型权重不在 git（`*.pt` 已忽略）：git 方式部署需单独拷贝
-  `models/hs_detect/weights/best.pt`（整体复制/rsync 会自动带上）。
-
-默认三个进程：`robot-core`（控制）+ `inspection-worker`（采集、模型、巡检）+
-`backend.service`（FastAPI，端口 8100）。感知进程同时提供原采集与巡检 socket，模型首次推理加载、任务间复用。
-原 `sensor-worker` / `inference-worker` 入口供独立调试，不能与感知进程同时运行。
-`sync-agent` 按 `ROBOT_SYNC_ENABLED`（未设置时读 YAML `sync.enabled`）单独启用。
-`robot-core` 必须先于其他进程就绪；模型或同步不可用不得阻止停车与人工接管。
-
-## 手动快速启动（不配 systemd，调试/验证用）
+## 启动、停止、检查
 
 ```bash
-# 前置：<项目>/robot.env 已就绪（cp robot.env.example robot.env 并填写）
 chmod +x deploy/quick_start_up.sh
 
 deploy/quick_start_up.sh check     # 冒烟检查：配置 + PostgreSQL 连通（不驻留进程）
-deploy/quick_start_up.sh start     # 启动全部：自动加载凭据、按需重建 venv、robot-core 先行
-deploy/quick_start_up.sh status    # 各组件状态 + healthz
+deploy/quick_start_up.sh start     # 启动全部：robot-core 先行，其余随后
+deploy/quick_start_up.sh status    # 各组件状态 + healthz（含 cloud_agent）
 deploy/quick_start_up.sh stop      # 全部停止（与启动相反的顺序）
-
-# 可用环境变量：
-#   ROBOT_ENV_FILE  凭据文件（默认 <项目>/robot.env）
-#   ROBOT_CONFIG    进程配置（默认 configs/hardware.yaml）
-#   BACKEND_PORT    后端端口（默认 8100）
-# 日志: logs/<组件>.log；pid: run/<组件>.pid
+deploy/quick_start_up.sh restart
 ```
 
-脚本内部顺序：检查迁移版本（开发自动迁移），先 robot-core（等待 socket 就绪），
-再感知进程、可选 sync-agent，最后 uvicorn。升级前停止旧进程；脚本会停止旧 pid 文件记录的独立 worker，
-systemd 安装会禁用旧独立 worker。重复绑定活跃 socket 会报错，无法替换正在工作的实例。
-手工单进程启动形如
-`nohup .venv/bin/python -m app.robot_core.processes.robot_core --config configs/hardware.yaml &`。
+可用环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ROBOT_ENV_FILE` | `<项目>/robot.env` | 凭据文件 |
+| `ROBOT_CONFIG` | `configs/hardware.yaml` | 进程配置 |
+| `BACKEND_PORT` | `8100` | 后端端口 |
+| `ROBOT_CLOUD_AGENT_ENABLED` | `true` | `false` 时不启动 cloud-agent |
+| `ROBOT_CLOUD_AGENT_CONFIG` | `configs/cloud-agent.toml` | cloud-agent 配置 |
+
+日志在 `logs/<组件>.log`，pid 在 `run/<组件>.pid`。脚本只处理自己托管的进程；
+不在 pidfile 里的实例默认不动，`stop --all` 才会一并停止。
+
+启动顺序：robot-core（等待 IPC health）→ 感知进程（等待两个 socket）→ 可选 sync-agent
+→ cloud-agent → backend（等待 `healthz` 的 `coreStatus=ok`）。
+重复绑定活跃 socket 会报错，无法替换正在工作的实例。
+
+## cloud-agent（云端接入）
+
+已并入 `app/cloud_agent`，作为**后台服务进程**运行——和 `inspection-worker`、`robot-core`
+同一套管理方式：独立 pid、独立日志、单独启停、常驻事件循环；只是共用 backend 的 `.venv`。
+
+```bash
+.venv/bin/python -m app.cloud_agent
+```
+
+- 只出站连云端，不监听 TCP；本地控制面默认 `run/cloud-agent.sock`
+- backend 的「云端接入」页面经 `ROBOT_CLOUD_AGENT_SOCKET`（默认同上）访问它
+- 未启动时页面显示「未运行」，本地业务不受影响
+- 凭据默认放 `<项目>/.cloud-agent/`（0600），可用 `ROBOT_CLOUD_AGENT_STATE_DIR` 改
 
 ## 联调与开发（无硬件）
 
 ```bash
-uv sync                       # 全量依赖（torch/opencv/串口/PyAV 均随项目依赖安装）
+uv sync                       # 一次装齐全部依赖（含 cloud-agent 用的 websockets/httpx）
 uv run fastapi dev            # http://127.0.0.1:8000（需先启动控制与感知进程）
-uv run pytest                 # 全量测试（robot_core + 后端；需要 PostgreSQL 测试库）
+uv run pytest                 # 全量测试（需要 PostgreSQL 测试库；纯单元用例自动跳过）
 ```
 
 `configs/dev.yaml` 连接本机 PostgreSQL（密码经 `ROBOT_DB_PASSWORD` 注入），
-可运行控制、感知与后端三个进程
-（`uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml --check`）。
+可运行控制、感知与后端三个进程：
+
+```bash
+uv run python -m app.robot_core.processes.robot_core --config configs/dev.yaml --check
+```
 
 ## 数据库迁移与权限
 
 版本由 `app/migrations` 统一管理，支持空库与旧 v1–v7 数据库升级，原业务数据保留。
 先备份生产库，再使用数据库所有者账号执行迁移；服务进程使用独立、非所有者、非超级用户账号。
-`robot.env.example` 默认关闭生产自动迁移，首次启动前必须执行：
+`robot.env.example` 默认关闭自动迁移，首次启动前必须执行：
 
 ```bash
 set -a; . ./robot.env; set +a
@@ -110,7 +103,7 @@ set -a; . ./robot.env; set +a
 .venv/bin/python -m app.robot_core.storage.migrate --config configs/hardware.yaml check
 ```
 
-生产设置 `ROBOT_AUTO_MIGRATE=false`，API 和感知进程仅校验版本；控制进程允许数据库离线启动，
+`ROBOT_AUTO_MIGRATE=false` 时，API 和感知进程仅校验版本；控制进程允许数据库离线启动，
 急停先执行、审计后补。`check` / 进程 `--check` 只读检查数据库，不升级结构。
 后续升级仍由所有者执行 `upgrade`；迁移带事务锁，重复执行安全，降级需从备份恢复。
 
@@ -131,8 +124,8 @@ set -a; . ./robot.env; set +a
 检查不连接数据库，也不会在错误信息中输出密码。数据库账号和密码可以不同，目标主机、端口、库名须一致。
 `localhost`、`127.0.0.1`、`::1` 按本机目标比较，Unix socket 地址通过 DSN 的 `host` 查询参数比较。
 数据库目标须显式提供主机（或 Unix socket 目录）和库名，不支持通过 libpq service 文件隐式指定目标。
-快速启动脚本会把所选 YAML 传给后端，systemd 模板使用 `configs/hardware.yaml`；
-手动启动后端时设置 `ROBOT_PLATFORM_CONFIG` 可启用相同检查（包含后端从 `robot.env` 读取的实际配置）。
+快速启动脚本会把所选 YAML 传给后端；手动启动后端时设置 `ROBOT_PLATFORM_CONFIG`
+可启用相同检查（包含后端从 `robot.env` 读取的实际配置）。
 
 内部巡检请求由共享契约校验，非法字段统一返回 `INVALID_REQUEST`；REST、WebSocket 与 Base64 图片格式保持不变。
 巡检仓储已使用 SQLAlchemy 编译命名参数，继续复用 psycopg 连接池，状态、事件、outbox 和通知仍处于同一事务；
@@ -149,13 +142,8 @@ set -a; . ./robot.env; set +a
 ## 鉴权
 
 - 默认 `ROBOT_AUTH_ENABLED=false`（开放模式，与旧前端联调契约一致）；
-- 生产开启后：`/api/v1/**`（除 `/auth/login|refresh|logout`）要求
+- 开启后：`/api/v1/**`（除 `/auth/login|refresh|logout`）要求
   `Authorization: Bearer <accessToken>`；首次启动自动创建 `admin`
   （密码见 `ROBOT_DEFAULT_ADMIN_PASSWORD`，登录后请立即修改）；
 - 令牌签发：`POST /api/v1/auth/login` → `accessToken` + `refreshToken`；
   刷新 `POST /api/v1/auth/refresh`；登出 `POST /api/v1/auth/logout`。
-
-## 放行限制（沿用旧平台约定）
-
-以下条件未满足前禁止切换生产控制权：真实设备协议与 HIL 测试、受控模型包验收、
-生产凭据与网络分区、急停/失联停车验收。本仓库默认 `simulated` 不驱动真实硬件。
