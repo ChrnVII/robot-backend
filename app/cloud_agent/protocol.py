@@ -16,6 +16,10 @@
 
 帧是 JSON 而不是二进制：可读、可 grep、可贴进日志。控制通道上每秒最多几十帧，
 这点序列化开销无关紧要。大块数据不走这里，走 HTTP。
+
+四条链路各自有 QoS 契约（见 `docs/实时接入平台架构与远程监控实施方案.md` §3.2），
+但**只有控制与状态共用这条 C0 连接**：状态帧允许整帧丢弃，命令帧不允许。媒体走
+独立的 `/ws/agent/media`（二进制帧头见本文件末尾），事件走 HTTP 批量上报。
 """
 
 from __future__ import annotations
@@ -40,23 +44,36 @@ def new_id() -> str:
 
 
 class MessageType(str, Enum):
-    HELLO = "hello"          # B -> A：注册，带设备信息与根目录
+    HELLO = "hello"          # B -> A：注册，带设备信息、根目录与能力清单
     COMMAND = "command"      # A -> B：下发指令
     RESULT = "result"        # B -> A：指令结果（成功或失败）
     EVENT = "event"          # 双向：主动通知（心跳、取消、上传失败）
+    STATE = "state"          # B -> A：设备状态快照。只留最新，可整帧丢弃
     ACK = "ack"              # A -> B：welcome，携带续传清单
     ERROR = "error"
 
+    # --- 媒体链路的文本帧 ---------------------------------------------
+    # 这三个只出现在 `/ws/agent/media` 上，不走 C0。放在同一张枚举里是因为
+    # 两端都要判断"这一帧该在哪条连接上处理"，分两套枚举只会多一处漂移点。
+    # 媒体链路上的**二进制帧**不走 Message：它是 flags+pts+seq+Annex-B，
+    # 见文件末尾的 MEDIA_FLAG_*。
+    MEDIA_CONFIG = "media_config"      # B -> A：codec / 时间轴基准 / 分辨率 / 档位
+    MEDIA_STATS = "media_stats"        # 双向：会话统计（码率、fps、丢帧）
+    MEDIA_CONTROL = "media_control"    # A -> B：请求关键帧 / 切档位 / 终止会话
+
 
 class CommandName(str, Enum):
-    """命令枚举。
+    """命令枚举（协议词汇表）。
 
     设计成封闭枚举而非自由字符串是刻意的：B 收到任何不在这张表里的命令都直接
     拒绝。即使 A 被攻破，攻击者能让 B 做的事也只是这个有限集合。
 
-    本系统只有读操作。没有 delete、没有 write、没有 run_command——参考项目
+    文件类命令只有读操作。没有 delete、没有 write、没有 run_command——参考项目
     remote-machine-access 的文档里承认了 `run_command` 能绕过路径沙箱
     （`cat /etc/passwd` 即可读全盘），我们不提供这个能力，从设计上消除 RCE 面。
+
+    `camera.*` 是远程监控链路（P1）的命令。设备驱动仍是模拟实现的部分
+    （AGV / 升降 / 灯光）**没有**对应命令——不把模拟能力包装成"已支持远程控制"。
     """
 
     PING = "ping"
@@ -66,9 +83,44 @@ class CommandName(str, Enum):
     START_UPLOAD = "start_upload"
     CANCEL_TASK = "cancel_task"
 
+    # --- 球形摄像头 -----------------------------------------------------
+    # 信封字段统一由 A 填：command_id / session_id / sequence / deadline /
+    # idempotency_key / trace_id（见方案 §5.1）。B 侧据此做去重与过期判定。
+    CAMERA_STREAM_START = "camera.stream.start"
+    CAMERA_STREAM_STOP = "camera.stream.stop"
+    CAMERA_PTZ = "camera.ptz"
+    CAMERA_PRESET_LIST = "camera.preset.list"
+    CAMERA_PRESET_GOTO = "camera.preset.goto"
+    CAMERA_SNAPSHOT = "camera.snapshot"        # 回包只带元信息，图像走独立二进制通道
+    CAMERA_STATE = "camera.state"              # 读取当前云台/预置点，用于纠正 unknown
 
-# B 端可以执行的命令白名单。任何不在其中的 command 一律 unknown_command。
-AGENT_ALLOWED_COMMANDS: frozenset[CommandName] = frozenset(CommandName)
+
+#: B 端**当前构建**能执行的命令。
+#:
+#: 它与 `CommandName` 不是一回事：枚举是协议词汇表（A 可能下发、别的构建可能
+#: 实现），这张表是本构建真的能做什么。两者分开，老 agent 收到 `camera.ptz`
+#: 时才会回 `unknown_command` 而不是关闭连接——这正是"解析宽松、执行严格"的
+#: 落地方式，也是两端能分别升级的前提。
+#:
+#: `camera.state` 暂列在枚举里但不在这里：云台位置需要相机侧的状态接口
+#: （ISAPI ``PTZCtrl/status``），当前部署没有配置它。缺这条时页面应显示
+#: "无法确认当前预置点"，而不是假装查到了。P2 补上后再加进来。
+AGENT_ALLOWED_COMMANDS: frozenset[CommandName] = frozenset(
+    {
+        CommandName.PING,
+        CommandName.LIST_DIR,
+        CommandName.STAT_FILE,
+        CommandName.HASH_FILE,
+        CommandName.START_UPLOAD,
+        CommandName.CANCEL_TASK,
+        CommandName.CAMERA_STREAM_START,
+        CommandName.CAMERA_STREAM_STOP,
+        CommandName.CAMERA_PTZ,
+        CommandName.CAMERA_PRESET_LIST,
+        CommandName.CAMERA_PRESET_GOTO,
+        CommandName.CAMERA_SNAPSHOT,
+    }
+)
 
 
 class ErrorCode(str, Enum):
@@ -91,6 +143,18 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = "rate_limited"
     INSUFFICIENT_SPACE = "insufficient_space"   # A 侧磁盘余量不够，建任务前就拒绝
     INTERNAL = "internal"
+
+    # --- 控制链路 -------------------------------------------------------
+    # 这三个是"命令没有明确成功"的三种不同原因，页面上的处置完全不同：
+    # expired 说明积压太久（该重发），stale 说明被更新的一条覆盖了（什么都不做），
+    # control_held 说明有人正在本地操作（要让操作者退让）。
+    EXPIRED = "expired"                         # 超过 deadline，未执行
+    STALE = "stale"                             # sequence 落后于已执行序号，丢弃
+    CONTROL_HELD = "control_held"               # 无有效租约 / 本地人工优先
+
+    # --- 媒体链路 -------------------------------------------------------
+    CAMERA_UNAVAILABLE = "camera_unavailable"   # 相机侧不可达（RTSP/ISAPI 失败）
+    STREAM_DISABLED = "stream_disabled"         # 本机未启用低延迟预览
 
 
 class ProtocolError(Exception):
@@ -157,6 +221,16 @@ class Message(BaseModel):
     def hello_frame(cls, agent_id: str, payload: dict[str, Any]) -> Message:
         return cls(type=MessageType.HELLO, agent_id=agent_id, payload=payload)
 
+    @classmethod
+    def state_frame(cls, payload: dict[str, Any]) -> Message:
+        """状态快照帧。payload 必须带 `state_version` 与 `observed_at`。
+
+        没有 version 就无法在云端判断新旧，没有 observed_at 就无法在页面上
+        显示"数据延迟多少秒"——两者都在 payload 里由生产者填，而不是这一层
+        代填，因为只有生产者知道状态是在哪一刻采集的。
+        """
+        return cls(type=MessageType.STATE, payload=payload)
+
     @property
     def command_name(self) -> CommandName | None:
         """把线上字符串还原成枚举；不认识就返回 None（而不是抛错）。"""
@@ -208,3 +282,20 @@ class Message(BaseModel):
             first = exc.errors()[0]
             loc = ".".join(str(p) for p in first["loc"]) or "<root>"
             raise ProtocolError(f"invalid frame at {loc}: {first['msg']}") from exc
+
+
+# --- 媒体通道的二进制帧 -------------------------------------------------
+#
+# 与 `app/video/codec.py`、`robot-frontend/src/composables/useCameraStream.js`
+# 三处必须一致，格式刻意沿用已有的本地预览链路，不重新设计：
+#
+#     flags(1) + pts_ms(4, LE) + seq(4, LE) + Annex-B 载荷
+#
+# 云端只在机器人出口与浏览器入口之间原样转发，不解析 NAL、不重打包。
+
+MEDIA_HEADER_BYTES = 9
+
+MEDIA_FLAG_KEY = 0x01        # 关键帧（IDR），客户端可在此重建解码器
+MEDIA_FLAG_CONFIG = 0x02     # 配置帧（预留）
+MEDIA_FLAG_RESET = 0x04      # 上游丢过帧，客户端必须先 reset 解码器
+MEDIA_FLAG_GOP_START = 0x08  # 降帧率跳帧后重新起步的首帧（P2 使用）

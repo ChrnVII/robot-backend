@@ -6,6 +6,8 @@ IPC 载荷统一经 app.contracts 契约模型组装（字段定义双端共用�
 
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import timedelta
 
 from app.common.clock import iso_z, utc_now
@@ -18,7 +20,7 @@ from app.contracts import (
     LeaseAcquireWire,
     LeaseReleaseWire,
 )
-from app.gateways.base import camelize
+from app.gateways.base import GatewayError, camelize
 from app.gateways.robot_core import RobotCoreGateway
 from app.schemas.control import CommandRequest, EmergencyResetRequest, EmergencyStopRequest, LeaseRequest
 
@@ -91,3 +93,24 @@ class ControlService:
         result = await self.query_device("camera", "presets")
         presets = result.get("presets")
         return list(presets) if isinstance(presets, list) else []
+
+    async def camera_snapshot(self) -> tuple[bytes, dict]:
+        """抓一张 JPEG。返回 (图像字节, 元信息)。
+
+        base64 只在 robot-core → backend 这一段存在（JSON IPC 过不了二进制），
+        到这里立刻解回字节，向上（HTTP 响应、云端回传）全是二进制。
+        """
+        result = await self.query_device("camera", "snapshot")
+        encoded = result.get("jpegBase64") or result.get("jpeg_base64")
+        if not isinstance(encoded, str) or not encoded:
+            raise GatewayError("camera returned no image data")
+        try:
+            image = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise GatewayError(f"camera image is not valid base64: {exc}") from exc
+        meta = {
+            "size": int(result.get("size") or len(image)),
+            "captured_at": result.get("capturedAt") or result.get("captured_at"),
+            "source": result.get("source") or "camera",
+        }
+        return image, meta

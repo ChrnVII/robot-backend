@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 from dataclasses import dataclass
@@ -252,15 +253,45 @@ class NetworkCameraDriver:
         return template.split("{preset}")[0].rstrip("/") or template
 
     async def query(self, name: str, params: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
-        """只读查询（不产生设备动作，因此不走命令审计与租约）。"""
-        if name != "presets":
-            raise ValueError(f"unsupported camera query: {name}")
-        path = self._presets_collection_path()
-        loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(
-            None, lambda: self._send_sync(path, method="GET")
-        )
-        return {"presets": parse_isapi_presets(raw), "source": "camera"}
+        """只读查询（不产生设备动作，因此不走命令审计与租约）。
+
+        支持两种：
+
+        - ``presets``：预置点清单，相机是唯一事实来源；
+        - ``snapshot``：抓一张 JPEG。返回值里带 base64 —— 这是**进程间**的
+          编码，不是链路编码。robot-core 与 backend 之间是 JSON IPC，二进制
+          过不去；到了云端那段（``/internal/snapshot/{id}``）仍然是纯二进制，
+          不会被 base64 再放大 33%。
+        """
+        if name == "presets":
+            path = self._presets_collection_path()
+            loop = asyncio.get_running_loop()
+            raw = await loop.run_in_executor(
+                None, lambda: self._send_sync(path, method="GET")
+            )
+            return {"presets": parse_isapi_presets(raw), "source": "camera"}
+
+        if name == "snapshot":
+            loop = asyncio.get_running_loop()
+            raw = await loop.run_in_executor(
+                None, lambda: self._send_sync(self.settings.snapshot_path, method="GET")
+            )
+            if not raw:
+                raise NetworkCameraError("camera returned an empty snapshot")
+            # 有些固件在认证失败时返回 200 + 一段 HTML，直接当图片发给前端
+            # 只会表现为"一片黑"，所以在源头就拦掉。
+            if not raw.startswith(b"\xff\xd8"):
+                raise NetworkCameraError(
+                    f"camera snapshot is not a JPEG (first bytes: {raw[:8]!r})"
+                )
+            return {
+                "jpeg_base64": base64.b64encode(raw).decode("ascii"),
+                "size": len(raw),
+                "captured_at": utc_now(),
+                "source": "camera",
+            }
+
+        raise ValueError(f"unsupported camera query: {name}")
 
     def _hikvision_ptz_xml(self, direct: str, speed: float) -> bytes:
         value = int(round(speed * 100))

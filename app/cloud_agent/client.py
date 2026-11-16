@@ -6,6 +6,12 @@
    先进 `outbox`，由同一个协程按序发出。两个协程并发 send 会交错帧，触发条件
    随机，是最难查的一类 bug。
 
+   状态帧（`state`）**不进 `outbox`**，走单独的“状态槽”：槽里只有最新一帧，
+   新的直接覆盖旧的。原因是两者的背压语义完全相反——回包不能丢（丢了就是
+   前端一直转圈），状态必须丢（留一堆过期状态毫无意义，还会把回包挤到后面）。
+   合成一个队列时，状态洪峰会把命令结果顶掉，这是"点云台没反应"的根源。
+   发送优先级固定为：`outbox` → 状态槽。
+
 2. **重连必须有退避 + jitter。** A 重启时所有 B 会在同一秒回来，不打退避就是
    自己 DDoS 自己。连接稳定超过 60s 才重置退避，否则"连上 1 秒就断"会以
    1s 的节奏无限重试。
@@ -13,6 +19,10 @@
 3. **控制连接断了不等于上传断了。** 上传走 HTTP，是独立的。WS 掉线时不去
    cancel 正在进行的上传——它们多半还能传完。重连后 A 会把未完成的 upload
    再报一遍，本地已经在跑的会被 `start()` 幂等忽略。
+
+能力协商：`hello` 里带 `capabilities` / `media_profiles` / `max_frame_kbps`，
+云端据此决定页面上显示哪些按钮。空列表是**明确回答"没有"**，缺字段表示
+"老版本，不知道"——两者不同，云端要分开处理。
 """
 
 from __future__ import annotations
@@ -26,16 +36,21 @@ import socket
 import time
 from typing import Any
 
+import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 from . import __version__
-from .config import AgentConfig
+from .backend import LocalBackend
+from .config import AgentConfig, resolve_state_dir
 from .enroll import rotate
 from .errors import AgentCommandError
-from .handlers import HandlerContext, dispatch
+from .events import EventOutbox, EventUploader
+from .handlers import HandlerContext, LeaseKeeper, dispatch
+from .media import MediaManager
 from .protocol import (
     AGENT_ALLOWED_COMMANDS,
+    CommandName,
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     ErrorCode,
@@ -44,6 +59,7 @@ from .protocol import (
     ProtocolError,
 )
 from .sandbox import Sandbox, SandboxError
+from .state_reporter import StateReporter
 from .uploader import UploadJob, UploadManager
 
 logger = logging.getLogger("robot-cloud-agent")
@@ -51,6 +67,31 @@ logger = logging.getLogger("robot-cloud-agent")
 OUTBOX_SIZE = 128
 STABLE_CONNECTION_SECONDS = 60.0
 MAX_BACKOFF = 30.0
+
+#: 本构建对外声明具备的能力。
+#:
+#: 云端据此决定是否显示"高清 / 云台 / 快照"按钮；**声明了却没实现，页面会在
+#: 按下去的那一刻才失败**，比不显示按钮更糟。所以这里只列真的做完了的东西：
+#:
+#:   media.ws.v1     —— /ws/agent/media 上行通道
+#:   camera.ptz      —— 云台方向控制（含租约与仲裁）
+#:   camera.snapshot —— 快照兜底
+#:   state.v1        —— 分组状态上报（P3 接通生产者后才算真具备）
+CAPABILITIES: tuple[str, ...] = (
+    "media.ws.v1",
+    "camera.ptz",
+    "camera.snapshot",
+    "state.v1",
+    "events.batch.v1",
+)
+
+#: 需要落本地 Outbox（可靠补传）的事件类型。
+#: 心跳之类不进这里：它只对"此刻在线"有意义，补传过去毫无价值。
+DURABLE_EVENTS = frozenset({"upload_failed", "upload_completed", "command.result"})
+
+#: 可用的媒体档位。一期只有相机子码流这一档——档位切换（P2）要能与相机
+#: 子/主码流、GOP 一起调，声明一堆切不过去的档位只会让页面多出无效按钮。
+MEDIA_PROFILES: tuple[str, ...] = ("low",)
 
 
 class AgentObserver:
@@ -84,8 +125,36 @@ class AgentClient:
         self.sandbox = sandbox
         self.observer = observer or AgentObserver()
         self.outbox: asyncio.Queue[str] = asyncio.Queue(maxsize=OUTBOX_SIZE)
+        # 状态槽：只保留最新一帧。`_wake` 是发送循环的唤醒信号，两个生产点
+        # （outbox 有新内容、状态槽被填）都要 set 一次，否则循环会一直睡着。
+        self._state_slot: str | None = None
+        self._wake = asyncio.Event()
+        #: 状态帧被覆盖掉的次数。用于判断"状态生产得太快"，不是错误。
+        self.state_dropped = 0
         self.uploads = UploadManager(sandbox, config, self._send_event)
-        self.context = HandlerContext(sandbox=sandbox, uploads=self.uploads)
+        # 摄像头这一路：本机 backend 是唯一能碰设备的一方，媒体上行是独立连接。
+        # 三者都在这里建一次，随进程生命周期存在。
+        self.backend = LocalBackend(config.backend_url, config.backend_token)
+        self.media = MediaManager(config)
+        self.leases = LeaseKeeper(self.backend)
+        # 状态上报与事件 Outbox：一个走 C0 的状态槽，一个走独立 HTTP。
+        self.outbox_events = EventOutbox(resolve_state_dir(config) / "events.db")
+        self.event_uploader = EventUploader(config, self.outbox_events)
+        self.state_reporter = StateReporter(
+            self.backend,
+            self.media,
+            self.publish_state,
+            client_connected=lambda: self._ws is not None,
+            outbox=self.outbox_events,
+        )
+        self.context = HandlerContext(
+            sandbox=sandbox,
+            uploads=self.uploads,
+            backend=self.backend,
+            media=self.media,
+            leases=self.leases,
+            snapshots=self._send_snapshot,
+        )
         self._ws: Any = None
         self._handlers: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
@@ -107,6 +176,9 @@ class AgentClient:
     async def run(self) -> None:
         backoff = 1.0
         self.auth_failed = False
+        await self.outbox_events.open()
+        self.state_reporter.start()
+        self.event_uploader.start()
         while not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -141,6 +213,11 @@ class AgentClient:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             backoff = min(backoff * 2, MAX_BACKOFF)
 
+        await self.state_reporter.stop()
+        await self.event_uploader.stop()
+        await self.media.stop_all()
+        await self.leases.release_all()
+        await self.backend.close()
         await self.uploads.close()
 
     async def _rotate_token(self) -> bool:
@@ -225,20 +302,69 @@ class AgentClient:
     # --- 发送 -----------------------------------------------------------
 
     async def _send_loop(self, ws: Any) -> None:
-        """唯一的写者。"""
+        """唯一的写者。
+
+        协作式唤醒而不是 `await outbox.get()`：状态帧与命令帧在两个地方，
+        用两个队列各自阻塞就会有两个写者（或者引入额外的转发协程）。
+        这里让生产者只负责"放好 + set 一下信号"，由发送循环按固定优先级取。
+        """
         while True:
-            frame = await self.outbox.get()
+            frame = self._drain()
+            if frame is None:
+                self._wake.clear()
+                # clear 之后再取一次：生产者可能正好在 clear 之前 set 并放好了帧，
+                # 那一拍 wait() 会永远等不到第二次唤醒。
+                frame = self._drain()
+                if frame is None:
+                    await self._wake.wait()
+                    continue
             await ws.send(frame)
+
+    def _drain(self) -> str | None:
+        """同步取一帧：`outbox` 优先，其次状态槽。
+
+        优先级不能反：状态是"现在是什么"，晚一拍就过期了，而命令回包晚一拍
+        用户就一直看着转圈。两者冲突时永远是丢弃状态。
+        """
+        while not self.outbox.empty():
+            try:
+                return self.outbox.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - empty() 与 get_nowait 之间的竞态
+                break
+        if self._state_slot is not None:
+            frame, self._state_slot = self._state_slot, None
+            return frame
+        return None
 
     async def _enqueue(self, frame: str, *, timeout: float = 5.0) -> None:
         await asyncio.wait_for(self.outbox.put(frame), timeout)
+        self._wake.set()
 
     def _enqueue_nowait(self, frame: str) -> bool:
         try:
             self.outbox.put_nowait(frame)
-            return True
         except asyncio.QueueFull:
             return False
+        self._wake.set()
+        return True
+
+    def publish_state(self, payload: dict[str, Any]) -> None:
+        """投递一帧状态快照（覆盖写，永不阻塞）。
+
+        payload 必须自带 `state_version`（单调递增）与 `observed_at`（采集时刻）：
+        云端靠前者判新旧，页面靠后者显示"数据延迟几秒"。这一层不代填——
+        只有采集方知道状态是哪一刻的。
+
+        调用方可以是任何协程；槽满即覆盖，因此这个方法是 O(1) 且不会失败。
+        上下文里没有连接时（未连上/正在重连）也照常入槽：要么下一次连上后
+        发出最新一帧，要么根本没机会发——两种情况都不需要调用方关心。
+        """
+        if not payload:
+            return
+        if self._state_slot is not None:
+            self.state_dropped += 1
+        self._state_slot = Message.state_frame(payload).to_json()
+        self._wake.set()
 
     async def _reply(self, message: Message) -> None:
         try:
@@ -250,6 +376,71 @@ class AgentClient:
         frame = Message(type=MessageType.EVENT, payload=payload).to_json()
         if not self._enqueue_nowait(frame):
             logger.debug("outbox 已满，事件被丢弃：%s", payload.get("kind"))
+        # 值得追溯的事件额外落本地 Outbox：C0 上的 EVENT 帧是尽力而为，
+        # 断线期间发不出去就没了；Outbox 会在恢复后补传并被云端去重。
+        kind = str(payload.get("kind") or "")
+        if kind in DURABLE_EVENTS:
+            await self._record(kind, payload)
+
+    async def _record(self, event_type: str, payload: dict[str, Any]) -> None:
+        seq = await self.outbox_events.append(event_type, payload)
+        if seq is not None:
+            self.event_uploader.notify()
+
+    async def _record_command(
+        self,
+        command: CommandName | None,
+        message: Message,
+        state: str,
+        code: str,
+        error: str,
+    ) -> None:
+        """命令终态进事件表：页面能对账，排障时也能还原"点了几次、结果如何"。"""
+        await self._record(
+            "command.result",
+            {
+                "command": command.value if command is not None else (message.command or ""),
+                "command_id": message.id,
+                "state": state,
+                "code": code,
+                "error": error[:200],
+                "trace_id": str(message.payload.get("trace_id") or ""),
+            },
+        )
+
+    async def _send_snapshot(
+        self, request_id: str, image: bytes, meta: dict[str, Any]
+    ) -> None:
+        """把 JPEG 送到云端。走独立的 HTTP 通道，不进控制帧。
+
+        这条路径刻意不走 C0：一张 20KB 的图 base64 之后 27KB，加上帧头就要挤占
+        命令队列；而控制通道单帧上限 256KB，弱网下（分片丢包 → 重传）会直接
+        把用户的"停止"命令堵在后面。
+        """
+        if not self.config.token:
+            raise AgentCommandError(ErrorCode.UNAUTHORIZED, "还没有云端凭据，无法回传快照")
+        url = f"{self.config.http_base}/internal/snapshot/{request_id}"
+        headers = {
+            "Authorization": f"Bearer {self.config.token}",
+            "Content-Type": "image/jpeg",
+            "X-Captured-At": str(meta.get("captured_at") or ""),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, content=image, headers=headers)
+        except httpx.HTTPError as exc:
+            raise AgentCommandError(
+                ErrorCode.TIMEOUT, f"快照回传失败：{exc}"
+            ) from exc
+
+        if response.status_code == 404:
+            # 云端已经等超时并丢弃了这个请求：图片没人要了。如实报错，
+            # 否则页面会一直转圈等一张永远不会出现的图。
+            raise AgentCommandError(ErrorCode.EXPIRED, "快照请求已在云端超时，图片未被接收")
+        if response.status_code >= 400:
+            raise AgentCommandError(
+                ErrorCode.INTERNAL, f"快照回传失败：HTTP {response.status_code}"
+            )
 
     # --- 接收 -----------------------------------------------------------
 
@@ -309,13 +500,17 @@ class AgentClient:
             result = await dispatch(command, message.payload, self.context)
         except AgentCommandError as exc:
             await self._reply(Message.error_frame(message.id, exc.code, exc.message))
+            await self._record_command(command, message, "rejected", exc.code.value, exc.message)
         except SandboxError as exc:
             await self._reply(Message.error_frame(message.id, ErrorCode.FORBIDDEN, str(exc)))
+            await self._record_command(command, message, "rejected", ErrorCode.FORBIDDEN.value, str(exc))
         except Exception as exc:
             logger.exception("处理命令 %s 时出错", command.value)
             await self._reply(Message.error_frame(message.id, ErrorCode.INTERNAL, str(exc)))
+            await self._record_command(command, message, "failed", ErrorCode.INTERNAL.value, str(exc))
         else:
             await self._reply(Message.result_frame(message.id, result))
+            await self._record_command(command, message, "succeeded", "", "")
 
     # --- 心跳 -----------------------------------------------------------
 
@@ -348,5 +543,9 @@ class AgentClient:
                 "agent_version": __version__,
                 "roots": [str(self.sandbox.root)],
                 "protocol": PROTOCOL_VERSION,
+                # 空列表 = 明确回答"这个构建没有这些能力"；字段缺失 = 老版本。
+                # 云端要分开显示：前者不该出现按钮，后者显示"不支持远程画面"而不是转圈。
+                "capabilities": list(CAPABILITIES),
+                "media_profiles": list(MEDIA_PROFILES),
             },
         )

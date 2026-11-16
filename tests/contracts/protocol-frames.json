@@ -1,5 +1,5 @@
 {
-  "_comment": "线上协议的黄金样例。server 与 agent 的测试都读这一份，各自的解析/序列化结果必须与它一致。改协议时先改这里，再改两端——两边不一致会立刻红。本文件只是测试夹具，不参与任何构建，也不会被装进任何包。",
+  "_comment": "线上协议的黄金样例。server 与 agent 的测试都读这一份（各有一份副本），各自的解析/序列化结果必须与它一致。改协议时先改这里，再改两端——两边不一致会立刻红。本文件只是测试夹具，不参与任何构建，也不会被装进任何包。媒体链路的二进制帧（flags+pts+seq+Annex-B）不是 Message，不在这里，见 protocol.py 的 MEDIA_FLAG_*。",
   "protocol_version": 1,
   "max_frame_bytes": 262144,
   "frames": [
@@ -74,7 +74,7 @@
     },
     {
       "name": "hello",
-      "description": "B 注册，带根目录与平台信息",
+      "description": "B 注册，带根目录、平台信息与能力清单（老版本不带 capabilities，云端容忍缺失）",
       "frame": {
         "v": 1,
         "type": "hello",
@@ -87,7 +87,19 @@
           "roots": [
             "/srv/share"
           ],
-          "protocol": 1
+          "protocol": 1,
+          "capabilities": [
+            "media.ws.v1",
+            "camera.ptz",
+            "camera.snapshot",
+            "state.v1"
+          ],
+          "media_profiles": [
+            "high",
+            "low",
+            "tiny"
+          ],
+          "max_frame_kbps": 2000
         },
         "ts": 1761033599.5
       }
@@ -148,6 +160,179 @@
           "message": "文件在上传过程中被修改：6291456 → 7340032 字节"
         },
         "ts": 1761033620.0
+      }
+    },
+    {
+      "name": "command_camera_ptz",
+      "description": "云台方向键 start/stop，带完整命令信封（方案 §5.1）：command_id 去重、deadline 过期不执行、sequence 判新旧",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "c9f1a2b3d4e5f607",
+        "command": "camera.ptz",
+        "payload": {
+          "command_id": "c9f1a2b3d4e5f607",
+          "session_id": "ctl-7f3a",
+          "sequence": 1024,
+          "action": "start",
+          "direct": "left",
+          "speed": 4,
+          "issued_at": 1761033600.1,
+          "deadline": 1761033600.6,
+          "idempotency_key": "ptz-left-1024",
+          "trace_id": "tr-9a1c"
+        },
+        "ts": 1761033600.1
+      }
+    },
+    {
+      "name": "command_camera_preset_goto",
+      "description": "转到预置点。幂等且可重试：超时后查 camera.state 纠正",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "aa11bb22cc33dd44",
+        "command": "camera.preset.goto",
+        "payload": {
+          "command_id": "aa11bb22cc33dd44",
+          "session_id": "ctl-7f3a",
+          "sequence": 1027,
+          "preset": "P3",
+          "issued_at": 1761033602.4,
+          "deadline": 1761033605.4,
+          "trace_id": "tr-9a1c"
+        },
+        "ts": 1761033602.4
+      }
+    },
+    {
+      "name": "command_camera_stream_start",
+      "description": "建立媒体会话。回包只带 codec/size，真正的帧走 /ws/agent/media",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "5f6e7d8c9b0a1234",
+        "command": "camera.stream.start",
+        "payload": {
+          "command_id": "5f6e7d8c9b0a1234",
+          "session_id": "med-4b21",
+          "camera_id": "VAR-1",
+          "profile": "low",
+          "issued_at": 1761033600.0,
+          "deadline": 1761033605.0,
+          "trace_id": "tr-9a1c"
+        },
+        "ts": 1761033600.0
+      }
+    },
+    {
+      "name": "command_camera_snapshot",
+      "description": "拍一张。回包只有元信息，JPEG 本体走 POST /internal/snapshot/{request_id}",
+      "frame": {
+        "v": 1,
+        "type": "command",
+        "id": "77e6d5c4b3a29180",
+        "command": "camera.snapshot",
+        "payload": {
+          "command_id": "77e6d5c4b3a29180",
+          "session_id": "ctl-7f3a",
+          "camera_id": "VAR-1",
+          "profile": "snapshot",
+          "issued_at": 1761033603.0,
+          "deadline": 1761033606.0,
+          "trace_id": "tr-9a1c"
+        },
+        "ts": 1761033603.0
+      }
+    },
+    {
+      "name": "state_snapshot",
+      "description": "设备状态快照（方案 §6.1）。state_version 单调递增，observed_at 是机器人采集时刻",
+      "frame": {
+        "v": 1,
+        "type": "state",
+        "id": "1111222233334444",
+        "payload": {
+          "state_version": 84213,
+          "observed_at": 1761033600.1,
+          "robot": {
+            "mode": "idle",
+            "battery": 76,
+            "mission": null
+          },
+          "camera": {
+            "online": true,
+            "preset": "P3",
+            "ptz": {
+              "pan": 12.5,
+              "tilt": -3.0
+            }
+          },
+          "media": {
+            "preview": "streaming",
+            "bitrate_kbps": 210,
+            "fps": 8
+          },
+          "link": {
+            "rtt_ms": 340,
+            "loss_pct": 12.0,
+            "uplink_kbps": 180
+          }
+        },
+        "ts": 1761033600.1
+      }
+    },
+    {
+      "name": "media_config",
+      "description": "媒体会话的编码参数（内部文本帧）。云端据此拼成浏览器要的 {\"t\":\"config\"}，不改变浏览器契约",
+      "frame": {
+        "v": 1,
+        "type": "media_config",
+        "id": "abcdabcdabcdabcd",
+        "payload": {
+          "session_id": "med-4b21",
+          "codec": "avc1.64001F",
+          "t0": 1761033600123,
+          "size": [
+            640,
+            360
+          ],
+          "profile": "low"
+        },
+        "ts": 1761033600.2
+      }
+    },
+    {
+      "name": "media_stats",
+      "description": "会话统计，每 2s 一条，供页面显示真实码率/fps",
+      "frame": {
+        "v": 1,
+        "type": "media_stats",
+        "id": "bbbbccccddddeeee",
+        "payload": {
+          "session_id": "med-4b21",
+          "bitrate_kbps": 214,
+          "fps": 8.2,
+          "dropped": 3,
+          "keyframe_waits": 0,
+          "last_frame_at": 1761033602.0
+        },
+        "ts": 1761033602.0
+      }
+    },
+    {
+      "name": "media_control",
+      "description": "云端要求上游重新出关键帧（观众队列溢出后的恢复手段）",
+      "frame": {
+        "v": 1,
+        "type": "media_control",
+        "id": "ccccddddeeeeffff",
+        "payload": {
+          "session_id": "med-4b21",
+          "action": "keyframe",
+          "reason": "viewer_reset"
+        },
+        "ts": 1761033602.5
       }
     }
   ],

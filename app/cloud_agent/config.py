@@ -36,6 +36,7 @@ PERSISTED_FIELDS = (
     "log_level",
     "state_dir",
     "control_socket",
+    "backend_url",
 )
 
 
@@ -66,6 +67,13 @@ class AgentConfig:
     http_timeout: float = 60.0
     # 本地控制面（UDS）。相对路径按进程工作目录解析。
     control_socket: str = "run/cloud-agent.sock"
+    # 本地 backend 的 HTTP 地址。媒体上行要连它的 /ws/camera/preview，
+    # 云台/预置点/快照要打它的设备接口——这几件事都发生在 backend 进程里，
+    # 不能在本进程内直接调函数。
+    backend_url: str = "http://127.0.0.1:8000"
+    # 给 backend 的令牌。留空时自动签发（同一份 ROBOT_JWT_SECRET）；
+    # 只有 backend 与 agent 用了不同 secret 时才需要手填。
+    backend_token: str = ""
     # 本次启动读到的配置文件路径；页面保存时写回同一个文件。
     config_path: str | None = None
 
@@ -81,6 +89,8 @@ class AgentConfig:
             raise ConfigError("heartbeat_interval 必须大于 0")
         if self.control_socket.strip() == "":
             raise ConfigError("control_socket 不能为空")
+        if not self.backend_url.strip().startswith(("http://", "https://")):
+            raise ConfigError(f"backend_url 必须是 http(s) 地址：{self.backend_url!r}")
         if self.server.strip():
             _ = self.http_base  # 协议写错要在这里就炸，而不是等到连的时候
 
@@ -134,6 +144,7 @@ class AgentConfig:
             "log_level": self.log_level,
             "state_dir": str(resolve_state_dir(self)),
             "control_socket": self.control_socket,
+            "backend_url": self.backend_url,
             "config_path": str(resolve_config_path(self)),
         }
 
