@@ -69,7 +69,8 @@ async def test_state_groups_are_filled_from_health():
 
     payload = await reporter.build()
 
-    assert payload["state_version"] == 1
+    assert payload["state_version"] >= 1
+    assert payload["epoch"]                       # 每次运行一个标识，云端靠它识别重启
     assert payload["robot"] == {"mode": "idle", "battery": 76}
     assert payload["camera"] == {"online": True}
     assert payload["link"]["control_uptime_s"] >= 0
@@ -84,6 +85,38 @@ async def test_version_is_monotonic():
     second = await reporter.build()
 
     assert second["state_version"] == first["state_version"] + 1
+
+
+async def test_version_survives_a_reconnect():
+    """控制连接重建会新建 StateReporter；版本不能跟着归零。
+
+    归零的后果很严重：云端只接受更大的版本，于是重启之后的所有状态帧都会被
+    当成旧帧丢掉，页面从此停在最后一个值上，越看越旧。
+    """
+    first, _ = make_reporter()
+    second, _ = make_reporter()          # 等价于重连后新建的 reporter
+
+    a = await first.build()
+    b = await second.build()
+
+    assert b["state_version"] > a["state_version"]
+    assert a["epoch"] == b["epoch"] == first.epoch
+
+
+async def test_version_survives_a_reconnect():
+    """控制连接重建会新建 StateReporter；版本不能跟着归零。
+
+    归零的后果很严重：云端只接受更大的版本，于是重启之后的所有状态帧都会被
+    当成旧帧丢掉，页面从此停在最后一个值上，越看越旧。
+    """
+    first, _ = make_reporter()
+    second, _ = make_reporter()          # 等价于重连后新建的 reporter
+
+    a = await first.build()
+    b = await second.build()
+
+    assert b["state_version"] > a["state_version"]
+    assert a["epoch"] == b["epoch"] == first.epoch
 
 
 async def test_missing_values_are_omitted_not_zeroed():
@@ -119,7 +152,7 @@ async def test_backend_failure_drops_groups_but_keeps_link():
     assert "robot" not in payload
     assert "camera" not in payload
     assert payload["link"]["control_uptime_s"] >= 0
-    assert payload["state_version"] == 1
+    assert payload["state_version"] > 0
 
 
 async def test_no_groups_means_no_frame():

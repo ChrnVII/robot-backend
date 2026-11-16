@@ -247,6 +247,40 @@ async def test_stream_start_passes_profile_and_camera():
     assert result["codec"] == "avc1.64001F"
 
 
+async def test_default_camera_alias_is_normalised_to_empty():
+    """云端用 "default" 表示"那台球形相机"，但本地相机目录里没有这个编号。
+
+    透传会得到 unknown_camera，本地预览 WS 直接被 1008 关闭——表现是页面
+    永远停在"等待画面"，而 agent 日志里只有一条 error 帧。
+    """
+    ctx, _, media, _ = make_context()
+
+    await dispatch(
+        CommandName.CAMERA_STREAM_START,
+        {"command_id": "c-20", "session_id": "med-9", "camera_id": "default"},
+        ctx,
+    )
+
+    assert media.started == [("med-9", "", "low")]
+
+
+async def test_default_camera_alias_is_normalised_to_empty():
+    """云端用 "default" 表示"那台球形相机"，但本地相机目录里没有这个编号。
+
+    透传会得到 unknown_camera，本地预览 WS 直接被 1008 关闭——表现是页面
+    永远停在"等待画面"，而 agent 日志里只有一条 error 帧。
+    """
+    ctx, _, media, _ = make_context()
+
+    await dispatch(
+        CommandName.CAMERA_STREAM_START,
+        {"command_id": "c-20", "session_id": "med-9", "camera_id": "default"},
+        ctx,
+    )
+
+    assert media.started == [("med-9", "", "low")]
+
+
 async def test_stream_start_requires_session():
     ctx, _, media, _ = make_context()
 

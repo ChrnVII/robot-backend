@@ -184,6 +184,10 @@ class MediaSession:
         self.gate = ProfileGate(profile)
         self.stats = MediaStats()
         self.config_frame: dict[str, Any] = {}
+        #: 上行的写锁。视频帧与统计帧来自两个协程，虽然 websockets 内部也有锁，
+        #: 但那属于库的实现细节；这里显式串行，保证顺序可预期（帧不会插进
+        #: 一条文本消息的两半里，也不依赖库版本的行为）。
+        self._send_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
         self._cloud: Any = None
@@ -260,11 +264,16 @@ class MediaSession:
         parts = self.config.backend_url.rstrip("/")
         scheme = "wss" if parts.startswith("https://") else "ws"
         host = parts.split("://", 1)[-1]
-        query = {"cameraId": self.camera_id}
+        # 空的 cameraId 表示"本地那台球形相机"：本地路由对空串走缺省分支，
+        # 传 "default" 反而会因为查不到这个编号而被拒（unknown_camera）。
+        query: dict[str, str] = {}
+        if self.camera_id:
+            query["cameraId"] = self.camera_id
         token = self._local_token()
         if token:
             query["accessToken"] = token
-        return f"{scheme}://{host}{LOCAL_PREVIEW_PATH}?{urlencode(query)}"
+        suffix = f"?{urlencode(query)}" if query else ""
+        return f"{scheme}://{host}{LOCAL_PREVIEW_PATH}{suffix}"
 
     def _local_token(self) -> str:
         """本机 backend 开了鉴权时需要它。取不到就让后端回 1008 —— 报错要具体。"""
@@ -357,6 +366,10 @@ class MediaSession:
             ping_interval=None,   # 本地回环，不需要保活
         )
 
+    async def _send(self, cloud: Any, payload: Any) -> None:
+        async with self._send_lock:
+            await cloud.send(payload)
+
     async def _pump_local(self, local: Any, cloud: Any) -> None:
         async for raw in local:
             if self._stop.is_set():
@@ -375,7 +388,7 @@ class MediaSession:
             self.stats.frames += 1
             self.stats.bytes += len(frame)
             self.stats.last_frame_at = time.time()
-            await cloud.send(frame)
+            await self._send(cloud, frame)
 
     async def _on_local_text(self, raw: str, cloud: Any) -> None:
         try:
@@ -395,8 +408,8 @@ class MediaSession:
             }
             self.config_frame = payload
             self._ready.set()
-            await cloud.send(
-                Message(type=MessageType.MEDIA_CONFIG, payload=payload).to_json()
+            await self._send(
+                cloud, Message(type=MessageType.MEDIA_CONFIG, payload=payload).to_json()
             )
             logger.info(
                 "媒体会话 %s 编码：%s %s", self.session_id, payload["codec"], payload["size"]
@@ -439,7 +452,9 @@ class MediaSession:
             self.stats.sample()
             payload = self.stats.snapshot(self.session_id)
             with contextlib.suppress(Exception):
-                await cloud.send(Message(type=MessageType.MEDIA_STATS, payload=payload).to_json())
+                await self._send(
+                    cloud, Message(type=MessageType.MEDIA_STATS, payload=payload).to_json()
+                )
 
 
 async def _close_quietly(ws: Any) -> None:
@@ -464,7 +479,7 @@ class MediaManager:
                 "profile": existing.profile,
                 "reused": True,
             }
-        session = MediaSession(self.config, session_id, camera_id or "default", profile or "low")
+        session = MediaSession(self.config, session_id, camera_id or "", profile or "low")
         self._sessions[session_id] = session
         try:
             return await session.start()

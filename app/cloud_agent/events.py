@@ -29,6 +29,7 @@ import logging
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +88,7 @@ class EventOutbox:
 
     def _open_sync(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(SCHEMA)
             conn.execute("PRAGMA journal_mode=WAL")
 
@@ -124,7 +125,7 @@ class EventOutbox:
         trace_id: str,
         occurred_at: float | None,
     ) -> int:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             cursor = conn.execute(
                 "INSERT INTO events (event_id, event_type, occurred_at, trace_id, payload_json)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -146,7 +147,7 @@ class EventOutbox:
         return await asyncio.to_thread(self._pending_sync, limit, cursor)
 
     def _pending_sync(self, limit: int, cursor: int) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT event_seq, event_id, event_type, schema_version, occurred_at,"
                 " trace_id, payload_json FROM events WHERE event_seq > ?"
@@ -172,7 +173,7 @@ class EventOutbox:
         return await asyncio.to_thread(self._stats_sync)
 
     def _stats_sync(self) -> dict[str, Any]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS count, COALESCE(MAX(event_seq), 0) AS max_seq,"
                 " COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM events"
@@ -194,7 +195,7 @@ class EventOutbox:
         return await asyncio.to_thread(self._acked_sync)
 
     def _acked_sync(self) -> int:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             return self._get_meta(conn, "acked_seq", 0)
 
     async def advance(self, seq: int) -> None:
@@ -208,7 +209,7 @@ class EventOutbox:
         await asyncio.to_thread(self._advance_sync, seq)
 
     def _advance_sync(self, seq: int) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             current = self._get_meta(conn, "acked_seq", 0)
             if seq <= current:
                 return
@@ -228,7 +229,7 @@ class EventOutbox:
         return dropped
 
     def _enforce_sync(self) -> int:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes,"
                 " COALESCE(MIN(event_seq), 0) AS min_seq, COALESCE(MAX(event_seq), 0) AS max_seq"

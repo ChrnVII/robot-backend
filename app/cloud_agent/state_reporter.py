@@ -24,14 +24,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
+import uuid
 from typing import Any
 
 from .backend import LocalBackend
 from .media import MediaManager
 
 logger = logging.getLogger("robot-cloud-agent")
+
+#: 本进程的标识，进程启动时生成一次。
+#:
+#: 它的存在只为一件事：让云端能区分"同一次运行内的乱序/重复"和"重启后版本
+#: 归零"。没有它，agent 一重启（连着控制通道一起重建），版本从 1 重新开始，
+#: 云端会把它当成旧帧**永久拒收**——页面从此停在最后一次状态上，越来越旧。
+PROCESS_EPOCH = uuid.uuid4().hex[:12]
+
+#: 进程内单调递增的版本号。
+#:
+#: 故意放在模块级而不是实例上：控制连接断开重连时 `AgentClient` 会被重建，
+#: 它里面的 `StateReporter` 也跟着新建；版本若挂在实例上就会跟着归零。
+#: 单事件循环、无并发，`itertools.count` 不需要加锁。
+_VERSION_COUNTER = itertools.count(1)
 
 #: 主循环间隔。也是 robot 组的频率。
 TICK_SECONDS = 1.0
@@ -60,6 +76,7 @@ class StateReporter:
         self.outbox = outbox
         self._connected = client_connected or (lambda: True)
         self.version = 0
+        self.epoch = PROCESS_EPOCH
         self.last_sent_at: float | None = None
         self.last_error: str = ""
         self.sent = 0
@@ -163,8 +180,14 @@ class StateReporter:
         if not payload:
             raise RuntimeError("没有任何可上报的状态组")
 
-        self.version += 1
-        return {"state_version": self.version, "observed_at": now, **payload}
+        # 版本来自进程级计数器，不随重连归零；epoch 告诉云端"这是哪一次运行"。
+        self.version = next(_VERSION_COUNTER)
+        return {
+            "state_version": self.version,
+            "observed_at": now,
+            "epoch": PROCESS_EPOCH,
+            **payload,
+        }
 
     def _camera_group(self, health: dict[str, Any], now: float) -> dict[str, Any] | None:
         """相机在线与否。变化时才重采（10s 兜底），减少对 robot-core 的打扰。"""

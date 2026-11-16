@@ -176,7 +176,12 @@ class AgentClient:
     async def run(self) -> None:
         backoff = 1.0
         self.auth_failed = False
-        await self.outbox_events.open()
+        try:
+            await self.outbox_events.open()
+        except Exception:  # noqa: BLE001 - 磁盘满/权限问题不该让控制通道起不来
+            # 事件通道降级为"不可用"，控制、状态、媒体照常工作：
+            # 一个附属能力失败，不能连带把机器人的远程控制一起停掉。
+            logger.exception("事件 Outbox 打不开，本次运行不上报事件")
         self.state_reporter.start()
         self.event_uploader.start()
         while not self._stop.is_set():

@@ -388,9 +388,20 @@ async def _lease(ctx: HandlerContext, session_id: str) -> str:
     return await ctx.leases.ensure(session_id)
 
 
+#: 云端用来表示"这台设备唯一那路相机"的占位编号。
+#: 本地 backend 的相机目录里没有叫 default 的相机，直接透传会得到
+#: `unknown_camera`——所以在这里归一化成空串，由本地按"缺省球形相机"解析。
+DEFAULT_CAMERA_ALIASES = {"default", "ptz", "camera"}
+
+
+def _camera_id(payload: dict[str, Any]) -> str:
+    value = _optional_string(payload, "camera_id") or ""
+    return "" if value.lower() in DEFAULT_CAMERA_ALIASES else value
+
+
 async def _camera_stream_start(payload: dict[str, Any], ctx: HandlerContext) -> dict[str, Any]:
     session_id = _required(payload, "session_id")
-    camera_id = _optional_string(payload, "camera_id") or "default"
+    camera_id = _camera_id(payload)
     profile = _optional_string(payload, "profile") or "low"
     try:
         return await _media(ctx).start(session_id, camera_id, profile)
@@ -431,7 +442,7 @@ async def _camera_ptz(payload: dict[str, Any], ctx: HandlerContext) -> dict[str,
 
 
 async def _camera_preset_list(payload: dict[str, Any], ctx: HandlerContext) -> dict[str, Any]:
-    camera_id = _optional_string(payload, "camera_id")
+    camera_id = _camera_id(payload) or None
     data = await _backend(ctx).presets(camera_id)
     items = data.get("items") if isinstance(data, dict) else None
     return {"items": list(items or []), "cameraId": data.get("cameraId") if isinstance(data, dict) else None}
@@ -469,7 +480,7 @@ async def _camera_snapshot(payload: dict[str, Any], ctx: HandlerContext) -> dict
     if ctx.snapshots is None:
         raise AgentCommandError(ErrorCode.INTERNAL, "本进程没有配置快照回传通道")
     request_id = _optional_string(payload, "command_id") or new_id()
-    camera_id = _optional_string(payload, "camera_id")
+    camera_id = _camera_id(payload)
     image, meta = await _backend(ctx).snapshot(camera_id)
     await ctx.snapshots(request_id, image, meta)
     return {
