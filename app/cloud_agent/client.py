@@ -140,6 +140,10 @@ class AgentClient:
         # 状态上报与事件 Outbox：一个走 C0 的状态槽，一个走独立 HTTP。
         self.outbox_events = EventOutbox(resolve_state_dir(config) / "events.db")
         self.event_uploader = EventUploader(config, self.outbox_events)
+        self._backend_ok = False
+        self._last_probe_at = 0.0
+        self._backend_ok = False
+        self._last_probe_at = 0.0
         self.state_reporter = StateReporter(
             self.backend,
             self.media,
@@ -184,6 +188,7 @@ class AgentClient:
             logger.exception("事件 Outbox 打不开，本次运行不上报事件")
         self.state_reporter.start()
         self.event_uploader.start()
+        await self._probe_backend()
         while not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -538,6 +543,34 @@ class AgentClient:
             if not self._enqueue_nowait(frame):
                 logger.warning("outbox 已满，跳过一拍心跳")
             self.observer.on_heartbeat()
+
+    async def _probe_backend(self) -> None:
+        """启动时确认 backend_url 指向的确实是 robot backend。
+
+        不阻塞、不致命：本地控制面出问题不该让云端接入起不来。但一定要留一条
+        醒目的日志——否则用户只会看到"页面出不了图"，而真正的原因（端口填成了
+        云端 server 的 8000）藏在几百行 debug 里。
+
+        节流：成功之后不再探；失败时最多每分钟一次，避免每次重连都等 3s 超时。
+        """
+        if self._backend_ok:
+            return
+        now = time.time()
+        if now - self._last_probe_at < 60.0:
+            return
+        self._last_probe_at = now
+
+        ok, detail = await self.backend.probe()
+        self._backend_ok = ok
+        if ok:
+            logger.info("本地 backend 就绪：%s", self.config.backend_url)
+            return
+        logger.error(
+            "本地 backend 不可用（%s）：%s；云台/快照/实时画面将不可用，"
+            "文件传输与云端连接不受影响",
+            self.config.backend_url,
+            detail,
+        )
 
     def _hello(self) -> Message:
         return Message.hello_frame(

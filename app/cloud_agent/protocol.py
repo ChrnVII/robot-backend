@@ -155,6 +155,10 @@ class ErrorCode(str, Enum):
     # --- 媒体链路 -------------------------------------------------------
     CAMERA_UNAVAILABLE = "camera_unavailable"   # 相机侧不可达（RTSP/ISAPI 失败）
     STREAM_DISABLED = "stream_disabled"         # 本机未启用低延迟预览
+    #: 机器人连不上自己的本地 backend（地址/协议/端口配错，或后端没起）。
+    #: 与 camera_unavailable 分开是刻意的：一个是"硬件坏了"，一个是"配置错了"，
+    #: 排查方向完全不同，混成一个码会把运维引向相机。
+    BACKEND_UNREACHABLE = "backend_unreachable"
 
 
 class ProtocolError(Exception):

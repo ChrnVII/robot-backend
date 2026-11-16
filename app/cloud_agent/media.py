@@ -26,7 +26,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -261,9 +261,13 @@ class MediaSession:
         return f"{self.config.ws_url}/media"
 
     def _local_url(self) -> str:
-        parts = self.config.backend_url.rstrip("/")
-        scheme = "wss" if parts.startswith("https://") else "ws"
-        host = parts.split("://", 1)[-1]
+        # 用 urlsplit 取 netloc，而不是字符串切分：backend_url 若被写成
+        # `http://host:8100/api` 这类带前缀的形式，切分出来的 host 会把 path
+        # 一起带上，拼成 `/api/ws/camera/preview`，永远连不上。
+        # 预览通道是根级路径，前缀一律丢弃。
+        parts = urlsplit(self.config.backend_url.strip())
+        scheme = "wss" if parts.scheme == "https" else "ws"
+        netloc = parts.netloc or "127.0.0.1:8100"
         # 空的 cameraId 表示"本地那台球形相机"：本地路由对空串走缺省分支，
         # 传 "default" 反而会因为查不到这个编号而被拒（unknown_camera）。
         query: dict[str, str] = {}
@@ -273,7 +277,7 @@ class MediaSession:
         if token:
             query["accessToken"] = token
         suffix = f"?{urlencode(query)}" if query else ""
-        return f"{scheme}://{host}{LOCAL_PREVIEW_PATH}{suffix}"
+        return f"{scheme}://{netloc}{LOCAL_PREVIEW_PATH}{suffix}"
 
     def _local_token(self) -> str:
         """本机 backend 开了鉴权时需要它。取不到就让后端回 1008 —— 报错要具体。"""
@@ -324,7 +328,13 @@ class MediaSession:
             local = await self._open_local()
         except Exception as exc:
             await _close_quietly(cloud)
-            raise MediaError("stream_disabled", f"本机预览通道不可用：{exc}") from exc
+            url = self._local_url()
+            # 一定把实际 URL 打出来：这类故障（端口错、协议错、指到了别的服务）
+            # 只有看到"连的是哪个地址"才排得下去。
+            logger.warning("本机预览连接失败 url=%s：%s", url, exc)
+            raise MediaError(
+                "backend_unreachable", f"本机预览通道不可用（{url}）：{exc}"
+            ) from exc
 
         self._cloud = cloud
         try:

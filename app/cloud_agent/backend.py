@@ -72,8 +72,11 @@ class LocalBackend:
                 method, path, json=json, params=params, timeout=limit
             )
         except httpx.HTTPError as exc:
+            # 连不上本机 backend 与"相机坏了"是两件事：前者是配置/进程问题，
+            # 后者是硬件问题。混成一个错误码会把排查引向相机。
             raise AgentCommandError(
-                ErrorCode.CAMERA_UNAVAILABLE, f"连不上本机后端 {self.base_url}：{exc}"
+                ErrorCode.BACKEND_UNREACHABLE,
+                f"连不上本机 backend {self.base_url}（{method} {path}）：{exc}",
             ) from exc
 
         if raw:
@@ -88,6 +91,27 @@ class LocalBackend:
         if isinstance(payload, dict) and "data" in payload:
             return payload.get("data")
         return payload
+
+    async def probe(self) -> tuple[bool, str]:
+        """确认 backend_url 指向的确实是 robot backend。
+
+        为什么用 `/api/v1/cameras`：这是 robot backend 独有的只读路由，云端
+        server 上没有它。所以它同时能回答两个问题——"通不通"和"是不是同一类服务"。
+        配错最常见的形态就是把它指向了云端 server 的端口（8000 而不是 8100），
+        那种情况下所有本地请求都会得到 404，却看起来像"设备不支持"。
+        """
+        try:
+            response = await self._connection().get("/api/v1/cameras", timeout=3.0)
+        except httpx.HTTPError as exc:
+            return False, f"连不上 {self.base_url}：{exc}"
+        if response.status_code == 404:
+            return False, (
+                f"{self.base_url} 上没有 /api/v1/cameras —— 这个地址不像 robot backend"
+                "（常见误配：填成了云端 server 的端口；robot backend 约定 8100）"
+            )
+        if response.status_code >= 400:
+            return False, f"{self.base_url}/api/v1/cameras 返回 HTTP {response.status_code}"
+        return True, "ok"
 
     # --- 租约 -----------------------------------------------------------
 
@@ -212,6 +236,8 @@ def _translate(response: httpx.Response, path: str, payload: Any = None) -> Agen
     body = payload if isinstance(payload, dict) else _json_or_empty(response)
     code = str(body.get("code") or "").lower()
     message = str(body.get("message") or response.reason_phrase or "")
+    # 一定带上"哪个请求"：地址配错时，只有一句 "Not Found" 是查不出东西的。
+    where = f"{response.request.method} {response.url}"
 
     if response.status_code == 409:
         # 409 一律是"当前状态不允许"：租约被本地人工占着，或者命令被仲裁拒了。
@@ -219,15 +245,22 @@ def _translate(response: httpx.Response, path: str, payload: Any = None) -> Agen
             return AgentCommandError(ErrorCode.CONTROL_HELD, f"控制权不在云端：{message}")
         return AgentCommandError(ErrorCode.CONTROL_HELD, message or "命令被本机仲裁拒绝")
     if response.status_code in (400, 422):
-        return AgentCommandError(ErrorCode.INVALID_ARGUMENTS, message or "参数不合法")
+        return AgentCommandError(
+            ErrorCode.INVALID_ARGUMENTS, f"{where} 参数不合法：{message}"
+        )
     if response.status_code in (401, 403):
         return AgentCommandError(
             ErrorCode.FORBIDDEN, f"本机后端拒绝了凭据（{path}）：{message}"
         )
     if response.status_code == 404:
-        return AgentCommandError(ErrorCode.CAMERA_UNAVAILABLE, message or f"{path} 不存在")
+        return AgentCommandError(
+            ErrorCode.CAMERA_UNAVAILABLE,
+            f"{where} 在 backend 上不存在（路径不对，或 backend 版本过旧）：{message}",
+        )
     if response.status_code >= 500:
-        return AgentCommandError(ErrorCode.CAMERA_UNAVAILABLE, message or f"后端错误 {response.status_code}")
+        return AgentCommandError(
+            ErrorCode.CAMERA_UNAVAILABLE, f"{where} 返回 HTTP {response.status_code}：{message}"
+        )
     return AgentCommandError(
         ErrorCode.INTERNAL, message or f"后端返回 {response.status_code}（{code or 'unknown'}）"
     )

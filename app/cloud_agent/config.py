@@ -70,7 +70,12 @@ class AgentConfig:
     # 本地 backend 的 HTTP 地址。媒体上行要连它的 /ws/camera/preview，
     # 云台/预置点/快照要打它的设备接口——这几件事都发生在 backend 进程里，
     # 不能在本进程内直接调函数。
-    backend_url: str = "http://127.0.0.1:8000"
+    #
+    # 默认 8100：这是 robot backend 的约定端口（见 readme 与 deploy/quick_start_up.sh
+    # 的 BACKEND_PORT）。**不要用 8000** —— 那是云端 monitor server 的常用端口，
+    # 指过去会把预设点/快照/预览全部打到云端，表现为"相机不可用"或
+    # "本机预览通道不可用：did not receive a valid HTTP response"。
+    backend_url: str = "http://127.0.0.1:8100"
     # 给 backend 的令牌。留空时自动签发（同一份 ROBOT_JWT_SECRET）；
     # 只有 backend 与 agent 用了不同 secret 时才需要手填。
     backend_token: str = ""

@@ -219,4 +219,7 @@ async def test_camera_command_fails_cleanly_when_local_backend_is_down(
 
     reply = json.loads(client.outbox.get_nowait())
     assert reply["ok"] is False
-    assert reply["error"]["code"] in {"camera_unavailable", "internal"}
+    # 连不上本地 backend 是**配置/进程问题**，不是相机坏了：错误码必须能区分，
+    # 否则页面显示"相机不可用"，运维会去查相机。
+    assert reply["error"]["code"] == "backend_unreachable"
+    assert "127.0.0.1" in reply["error"]["message"]

@@ -26,5 +26,17 @@ log_level = "INFO"
 # 本地控制面 UDS。相对路径按进程工作目录解析，backend 读同一个地址。
 control_socket = "run/cloud-agent.sock"
 
+# 本机 robot backend 的 HTTP 地址。云台、预置点、快照、实时画面都从这里取。
+# 生产形态是 8100（deploy/quick_start_up.sh 的 BACKEND_PORT）；用 `fastapi dev`
+# 联调时它监听 8000 —— 但 8000 也常被云端 monitor server 占用，两者同机时
+# 必须错开。填错的典型症状：预置点 503、实时画面报"本机预览通道不可用"。
+backend_url = "http://127.0.0.1:8100"
+
+# 本机 robot backend 的 HTTP 地址。云台、预置点、快照、实时画面都从这里取。
+# 生产形态是 8100（deploy/quick_start_up.sh 的 BACKEND_PORT）；用 `fastapi dev`
+# 联调时它监听 8000 —— 但 8000 也常被云端 monitor server 占用，两者同机时
+# 必须错开。填错的典型症状：预置点 503、实时画面报"本机预览通道不可用"。
+backend_url = "http://127.0.0.1:8100"
+
 # 凭据目录。留空则默认 <项目>/.cloud-agent/（0600）。
 # state_dir = "/var/lib/robot/cloud-agent"
