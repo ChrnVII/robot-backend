@@ -132,18 +132,3 @@ def test_local_preview_url_omits_empty_camera_id():
 
     assert default_camera._local_url() == "ws://127.0.0.1:8000/ws/camera/preview"
     assert explicit._local_url().endswith("/ws/camera/preview?cameraId=VAR-1")
-
-
-def test_local_preview_url_omits_empty_camera_id():
-    """空 cameraId 表示"本地那台球形相机"，不能传成 cameraId=default。"""
-    from app.cloud_agent.media import MediaSession
-
-    class Config:
-        backend_url = "http://127.0.0.1:8000"
-        backend_token = ""
-
-    default_camera = MediaSession(Config(), "med-1", "", "low")  # type: ignore[arg-type]
-    explicit = MediaSession(Config(), "med-2", "VAR-1", "low")  # type: ignore[arg-type]
-
-    assert default_camera._local_url() == "ws://127.0.0.1:8000/ws/camera/preview"
-    assert explicit._local_url().endswith("/ws/camera/preview?cameraId=VAR-1")

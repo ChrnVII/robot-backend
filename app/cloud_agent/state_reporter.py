@@ -132,8 +132,11 @@ class StateReporter:
 
     async def _tick(self) -> None:
         if not self._connected():
-            # 没连上就只更新本地缓存，不攒版本：连上后第一帧应该是"现在"，
-            # 而不是一串补发的历史。
+            # 没连上就什么都不做：不采集、不推进版本。
+            #
+            # 采集本身要打一次本机 HTTP，断线期间每秒一次全是白费；更重要的是
+            # 版本号——连上后的第一帧必须是"现在"，而不是一串补发的历史。
+            # 这也是状态链路"只留最新"的落点：跳过一拍不损失任何信息。
             return
         payload = await self.build()
         self._publish(payload)
@@ -143,7 +146,13 @@ class StateReporter:
     # --- 采集 -----------------------------------------------------------
 
     async def build(self) -> dict[str, Any]:
-        """采一帧。任何一个组拿不到就不带这个键，绝不填假值。"""
+        """采一帧。任何一个组拿不到就不带这个键，绝不填假值。
+
+        每个组都是**独立失败域**：某一组的采集代码坏了（比如统计对象少一个
+        属性），只该让这个组缺席，不该让整帧状态消失。状态链路的契约是
+        "允许丢增量、只留最新"，一帧丢失的代价远小于一个 bug 让页面永久停在
+        旧值上——而且那种故障在日志里只有一行被吞掉的异常。
+        """
         now = time.time()
         payload: dict[str, Any] = {}
 
@@ -153,13 +162,12 @@ class StateReporter:
             self.last_error = str(exc)
             health = {}
 
-        robot = _robot_group(health)
-        if robot:
-            payload["robot"] = robot
-
-        camera = self._camera_group(health, now)
-        if camera:
-            payload["camera"] = camera
+        for name, group in (
+            ("robot", _robot_group(health)),
+            ("camera", self._camera_group(health, now)),
+        ):
+            if group:
+                payload[name] = group
 
         lag = None
         if self.outbox is not None:
@@ -167,13 +175,18 @@ class StateReporter:
                 lag = int((await self.outbox.stats()).get("lag") or 0)
             except Exception as exc:  # noqa: BLE001 - 事件库临时不可读就不报这个数
                 logger.debug("读取事件积压失败：%s", exc)
-        link = self._link_group(now, lag)
-        if link:
-            payload["link"] = link
 
-        media = self._media_group()
-        if media:
-            payload["media"] = media
+        for name, produce in (
+            ("link", lambda: self._link_group(now, lag)),
+            ("media", self._media_group),
+        ):
+            try:
+                group = produce()
+            except Exception as exc:  # noqa: BLE001 - 单组失败不拖垮整帧
+                logger.warning("状态组 %s 采集失败：%s", name, exc)
+                continue
+            if group:
+                payload[name] = group
 
         # 什么都没有（后端挂了、也没媒体会话）：不推进版本，
         # 否则"版本在涨、内容全空"会让页面以为数据很新。
@@ -223,8 +236,6 @@ class StateReporter:
             "media_reconnects": reconnects,
             "control_uptime_s": round(now - self.started_at, 1),
         }
-        if lag is not None:
-            group["event_lag_seq"] = lag
         if lag is not None:
             group["event_lag_seq"] = lag
         self._last_link = group

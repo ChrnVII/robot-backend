@@ -117,12 +117,31 @@ class ProfileGate:
 
 
 class MediaError(Exception):
-    """媒体会话建立失败。code 直接映射到 ErrorCode。"""
+    """媒体会话建立失败。code 直接映射到 ErrorCode。
 
-    def __init__(self, code: str, message: str) -> None:
+    `retry` 决定这条故障是不是"等一会儿就会好"。这个区分不是洁癖：
+    会话已经出过图之后，本机 backend 重启（`backend_unreachable`）必须继续
+    重连，否则一次后端滚动重启就把云端画面永久打死；而"本机没开低延迟预览"
+    （`stream_disabled`）重连一万次也不会变好。混成一类，两边都会错。
+    """
+
+    def __init__(self, code: str, message: str, *, retry: bool = False) -> None:
         self.code = code
         self.message = message
+        self.retry = retry
         super().__init__(f"{code}: {message}")
+
+
+#: 这些故障等一会儿会自己好：本机后端重启、端口暂时没起。
+RETRYABLE_CODES = frozenset({"backend_unreachable"})
+
+#: 云端**主动**结束会话时的关闭码。
+#:
+#: 1000 = 正常关闭（空闲回收 / 管理员终止 / 服务重启），4403 = 这条会话不属于
+#: 本机，4404 = 会话已被云端回收。这三种重连一万次也一样，必须收敛——否则每关
+#: 一个会话就在机器人上留一个永久重试的僵尸任务，日志里只看得到 4404。
+#: 反过来说，1001/1006/1012 这类是链路断了，属于可重连。
+TERMINAL_CLOSE_CODES = frozenset({1000, 4403, 4404})
 
 
 @dataclass
@@ -151,7 +170,15 @@ class MediaStats:
         self._sample_bytes = self.bytes
         self._sample_frames = self.frames
 
-    def snapshot(self, session_id: str) -> dict[str, Any]:
+    def snapshot(self, session_id: str, profile: str) -> dict[str, Any]:
+        """当前统计。
+
+        `profile` 必须由调用方传入：档位是可变的（`ProfileGate.set_profile`），
+        而统计对象只负责计数，不持有档位。以前这里读 `self.gate.profile`，
+        属性根本不存在，于是每 2s 抛一次 AttributeError——既让 `media_stats`
+        一帧也发不出去，又通过 `MediaManager.snapshot()` 把状态链路一起打挂
+        （见 state_reporter 的 link/media 组）。
+        """
         return {
             "session_id": session_id,
             "bitrate_kbps": self.bitrate_kbps,
@@ -160,7 +187,7 @@ class MediaStats:
             "keyframes": self.keyframes,
             "dropped": 0,
             "skipped_frames": self.skipped_frames,
-            "profile": self.gate.profile,
+            "profile": profile,
             "last_frame_at": self.last_frame_at,
             "reconnects": self.reconnects,
             "last_error": self.last_error,
@@ -193,6 +220,8 @@ class MediaSession:
         self._cloud: Any = None
         self._ready = asyncio.Event()
         self._failure: MediaError | None = None
+        #: 云端明确要求结束（`media_control stop`）：置位后不再重连。
+        self._terminal = False
 
     # --- 生命周期 -------------------------------------------------------
 
@@ -242,13 +271,18 @@ class MediaSession:
         self.gate.request_keyframe()
         logger.debug("会话 %s 请求关键帧：下一段 GOP 不再跳过", self.session_id)
 
-    def set_profile(self, profile: str) -> str:
-        """换档。返回实际生效的档位（非法值回落到当前档）。"""
-        if self.gate.set_profile(profile):
-            self.profile = self.gate.profile
-            logger.info("会话 %s 切档：%s（每 %d 段 GOP 保留 1 段）",
-                        self.session_id, self.profile, self.gate.stride)
-        return self.profile
+    def set_profile(self, profile: str) -> bool:
+        """换档。返回**是否真的变了**（非法值/同档返回 False）。
+
+        返回 bool 而不是新档位：调用方只关心"要不要重发 config"。返回档位
+        字符串时任何非空值都为真，等于每次都重发，反而分不清是否生效。
+        """
+        if not self.gate.set_profile(profile):
+            return False
+        self.profile = self.gate.profile
+        logger.info("会话 %s 切档：%s（每 %d 段 GOP 保留 1 段）",
+                    self.session_id, self.profile, self.gate.stride)
+        return True
 
     # --- 上行 -----------------------------------------------------------
 
@@ -294,14 +328,19 @@ class MediaSession:
             except asyncio.CancelledError:
                 raise
             except MediaError as exc:
-                self._failure = exc
-                # 放弃重试：这种错误（未启用预览 / 会话未知）重试一万次也一样。
-                # 置 stop 让 `alive` 变假，下次 start 会建一个干净会话，而不是
-                # 复用一个已经死掉、config 还停留在旧值的壳。
-                self._stop.set()
-                self._ready.set()
-                logger.warning("媒体会话 %s 建立失败：%s", self.session_id, exc.message)
-                return
+                if not self._ready.is_set() or not exc.retry:
+                    # 会话还没起步就失败，或者属于"重试一万次也一样"（未启用预览 /
+                    # 会话未知 / 凭据无效）：置 stop 让 `alive` 变假，并把错误交回
+                    # `start()`，云端据此给页面一个具体原因而不是干等超时。
+                    self._failure = exc
+                    self._stop.set()
+                    self._ready.set()
+                    logger.warning("媒体会话 %s 建立失败：%s", self.session_id, exc.message)
+                    return
+                # 已经出过图之后的"可恢复"故障（本机 backend 重启之类）：
+                # 继续走下面的退避重连，否则一次滚动重启就把画面永久打死。
+                self.stats.last_error = f"{exc.code}: {exc.message}"
+                logger.info("媒体会话 %s 暂时不可用，稍后重连：%s", self.session_id, exc.message)
             except ConnectionClosed as exc:
                 self.stats.last_error = f"connection closed: {exc}"
                 logger.info("媒体会话 %s 断开：%s", self.session_id, exc)
@@ -323,6 +362,14 @@ class MediaSession:
             await asyncio.wait_for(self._stop.wait(), timeout=delay)
 
     async def _connect_once(self) -> None:
+        """连上云端与本地各一条，然后**互为收尾**地搬运数据。
+
+        这里不能用 `gather`：gather 要两条都结束才返回。本地预览先断（相机
+        RTSP 掉了、backend 重启）时，本地那条已经结束而云端那条还在等消息，
+        gather 会一直挂着——表现为"设备在线、上游连着、一帧都没有"，页面永远
+        停在"画面停滞"，而且机器人再也不会自己恢复。所以用 wait(FIRST_COMPLETED)
+        并在任一条结束时取消另一条，再由 `_run_upstream` 决定重连还是收敛。
+        """
         cloud = await self._open_cloud()
         try:
             local = await self._open_local()
@@ -333,19 +380,47 @@ class MediaSession:
             # 只有看到"连的是哪个地址"才排得下去。
             logger.warning("本机预览连接失败 url=%s：%s", url, exc)
             raise MediaError(
-                "backend_unreachable", f"本机预览通道不可用（{url}）：{exc}"
+                "backend_unreachable",
+                f"本机预览通道不可用（{url}）：{exc}",
+                retry=True,
             ) from exc
 
         self._cloud = cloud
+        pumps = {
+            asyncio.create_task(self._pump_local(local, cloud), name="media-local"),
+            asyncio.create_task(self._pump_cloud(cloud), name="media-cloud"),
+        }
         try:
-            await asyncio.gather(
-                self._pump_local(local, cloud),
-                self._pump_cloud(cloud),
-            )
+            done, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            # 关闭码必须在 finally 之前读：我们自己 `close()` 也会把它写成 1000，
+            # 那会把"本地预览断了、我主动收掉云端这条"误判成"云端结束了会话"。
+            code = getattr(cloud, "close_code", None)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                # 先完成的那条如果抛了，原样上抛给 `_run_upstream` 分类处理。
+                task.result()
         finally:
+            for task in pumps:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
             self._cloud = None
             await _close_quietly(local)
             await _close_quietly(cloud)
+
+        if self._terminal or code in TERMINAL_CLOSE_CODES:
+            # 云端已经把这条会话结束了：不再重连。重连只会得到 4404，
+            # 并且每关一个会话就在机器人上留一个永久重试的任务。
+            self._stop.set()
+            logger.info("媒体会话 %s 由云端结束（code=%s）", self.session_id, code)
+            return
+        # 走到这里说明是本机这条腿断了（预览通道关闭 / 相机 RTSP 断），
+        # 云端会话还在：重连，别把会话本身判死。
+        raise MediaError(
+            "backend_unreachable", "本机预览通道已断开，准备重连", retry=True
+        )
 
     async def _open_cloud(self) -> Any:
         token = self.config.token
@@ -428,8 +503,16 @@ class MediaSession:
         if kind == "error":
             code = str(message.get("code") or "stream_disabled")
             reason = str(message.get("reason") or message.get("message") or "")
-            raise MediaError(code, reason or "本机预览通道不可用")
-        # det / record / stop 等本地消息与云端无关，丢掉。
+            raise MediaError(
+                code,
+                reason or "本机预览通道不可用",
+                # 本机后端重启期间预览通道也是不可达的，这属于"等一会儿就好"；
+                # 而 stream_disabled / unknown_camera 是配置问题，重试无意义。
+                retry=code in RETRYABLE_CODES,
+            )
+        # det / record / stop 等本地消息与云端无关。
+        # `stop` 表示本地推流服务要重启：不在这里解释，让 socket 自己关，
+        # 由 `_connect_once` 的重连路径接住。
 
     async def _pump_cloud(self, cloud: Any) -> None:
         async for raw in cloud:
@@ -445,13 +528,29 @@ class MediaSession:
                 if action == "keyframe":
                     self.request_keyframe()
                 elif action == "profile":
-                    self.set_profile(str(message.payload.get("profile") or ""))
+                    if self.set_profile(str(message.payload.get("profile") or "")):
+                        # 档位变了就必须重发 config：页面用 config 里的 profile
+                        # 显示"当前档位"，不发就永远显示旧档，自动降级在页面上
+                        # 看起来像没生效。
+                        await self._send_config(cloud)
                 elif action == "stop":
+                    # 云端明确结束：置终态，外层据此收敛，不再重连。
+                    self._terminal = True
                     logger.info("云端要求结束会话 %s", self.session_id)
                     return
             elif message.type is MessageType.ERROR:
                 detail = message.error
                 logger.warning("媒体链路上的服务端错误：%s", detail.message if detail else "")
+
+    async def _send_config(self, cloud: Any) -> None:
+        """把当前 codec/时间轴/档位重发一遍。"""
+        if not self.config_frame:
+            return
+        payload = {**self.config_frame, "profile": self.profile}
+        self.config_frame = payload
+        await self._send(
+            cloud, Message(type=MessageType.MEDIA_CONFIG, payload=payload).to_json()
+        )
 
     async def _stats_loop(self) -> None:
         while not self._stop.is_set():
@@ -460,7 +559,7 @@ class MediaSession:
             if cloud is None:
                 continue
             self.stats.sample()
-            payload = self.stats.snapshot(self.session_id)
+            payload = self.stats.snapshot(self.session_id, self.profile)
             with contextlib.suppress(Exception):
                 await self._send(
                     cloud, Message(type=MessageType.MEDIA_STATS, payload=payload).to_json()
@@ -497,20 +596,6 @@ class MediaManager:
             self._sessions.pop(session_id, None)
             raise
 
-    def set_profile(self, session_id: str, profile: str) -> str | None:
-        """换档。会话不在就返回 None（调用方据此报 stream_disabled）。"""
-        session = self._sessions.get(session_id)
-        if session is None:
-            return None
-        return session.set_profile(profile)
-
-    def set_profile(self, session_id: str, profile: str) -> str | None:
-        """换档。会话不在就返回 None（调用方据此报 stream_disabled）。"""
-        session = self._sessions.get(session_id)
-        if session is None:
-            return None
-        return session.set_profile(profile)
-
     async def stop(self, session_id: str, reason: str = "stopped") -> bool:
         session = self._sessions.pop(session_id, None)
         if session is None:
@@ -530,7 +615,7 @@ class MediaManager:
                     "camera_id": session.camera_id,
                     "profile": session.profile,
                     "stride": session.gate.stride,
-                    "stats": session.stats.snapshot(session.session_id),
+                    "stats": session.stats.snapshot(session.session_id, session.profile),
                 }
                 for session in self._sessions.values()
             ]

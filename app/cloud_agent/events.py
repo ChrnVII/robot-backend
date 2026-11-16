@@ -65,6 +65,9 @@ BATCH_LIMIT = 50
 FLUSH_INTERVAL = 2.0
 IDLE_INTERVAL = 15.0
 RETRY_MAX = 60.0
+#: 限容检查间隔。它是两条聚合 SQL，不必每轮都跑；但也别太长，
+#: 否则一次长时间离线会在两次检查之间把盘写满。
+ENFORCE_INTERVAL = 60.0
 
 
 def new_event_id() -> str:
@@ -179,11 +182,16 @@ class EventOutbox:
                 " COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM events"
             ).fetchone()
             acked = self._get_meta(conn, "acked_seq", 0)
+        count = int(row["count"])
         return {
-            "count": int(row["count"]),
+            "count": count,
             "max_seq": int(row["max_seq"]),
             "acked_seq": int(acked),
-            "lag": max(0, int(row["max_seq"]) - int(acked)),
+            # 落后量就是"表里还剩多少条没确认"。
+            # 不用 `max_seq - acked`：限容会删掉最旧的行却不推进 acked，
+            # 那个差值会把已经丢弃的历史一直算成"待补传"，页面上的
+            # "落后 N 条"于是永远回不到 0。
+            "lag": count,
             "bytes": int(row["bytes"]),
         }
 
@@ -301,7 +309,13 @@ class EventOutbox:
 
 
 class EventUploader:
-    """把 Outbox 里的事件批量送到云端，按游标推进。"""
+    """把 Outbox 里的事件批量送到云端，按游标推进。
+
+    顺带承担**限容**：`EventOutbox.enforce_limits()` 必须有人定期调，否则
+    200MB / 7 天这条上限形同虚设——一台断网几周的机器人会把磁盘写满，
+    而且 `event.gap` 永远不会出现，云端看到的是一条"什么都没发生"的完整
+    时间线，比明确报缺口更糟。
+    """
 
     def __init__(self, config: AgentConfig, outbox: EventOutbox) -> None:
         self.config = config
@@ -309,8 +323,12 @@ class EventUploader:
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        #: 上次限容时刻。0 表示"还没做过"——启动后第一轮就跑一次，
+        #: 把上次长时间离线攒下的积压先裁掉。
+        self._last_enforce = 0.0
         self.sent = 0
         self.duplicates = 0
+        self.dropped = 0
         self.failures = 0
         self.last_error = ""
 
@@ -335,10 +353,25 @@ class EventUploader:
         """有新事件：立刻醒来发一轮，不等下一个 tick。"""
         self._wake.set()
 
+    async def enforce_limits(self) -> int:
+        """按间隔执行一次限容。返回本次丢弃条数。"""
+        now = time.time()
+        if now - self._last_enforce < ENFORCE_INTERVAL:
+            return 0
+        self._last_enforce = now
+        try:
+            dropped = await self.outbox.enforce_limits()
+        except Exception as exc:  # noqa: BLE001 - 限容失败不该停掉补传
+            logger.warning("事件 Outbox 限容失败：%s", exc)
+            return 0
+        self.dropped += dropped
+        return dropped
+
     def status(self) -> dict[str, Any]:
         return {
             "sent": self.sent,
             "duplicates": self.duplicates,
+            "dropped": self.dropped,
             "failures": self.failures,
             "last_error": self.last_error,
         }
@@ -350,6 +383,9 @@ class EventUploader:
         while not self._stop.is_set():
             flushed = 0
             try:
+                # 先限容再补传：积压已经超限时，先把最旧的裁掉并留下 event.gap，
+                # 免得把磁盘写满，也免得补传一堆注定会被裁掉的历史。
+                await self.enforce_limits()
                 flushed = await self.flush()
                 backoff = 1.0
             except asyncio.CancelledError:

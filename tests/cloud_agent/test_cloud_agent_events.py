@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -85,22 +86,6 @@ async def test_version_is_monotonic():
     second = await reporter.build()
 
     assert second["state_version"] == first["state_version"] + 1
-
-
-async def test_version_survives_a_reconnect():
-    """控制连接重建会新建 StateReporter；版本不能跟着归零。
-
-    归零的后果很严重：云端只接受更大的版本，于是重启之后的所有状态帧都会被
-    当成旧帧丢掉，页面从此停在最后一个值上，越看越旧。
-    """
-    first, _ = make_reporter()
-    second, _ = make_reporter()          # 等价于重连后新建的 reporter
-
-    a = await first.build()
-    b = await second.build()
-
-    assert b["state_version"] > a["state_version"]
-    assert a["epoch"] == b["epoch"] == first.epoch
 
 
 async def test_version_survives_a_reconnect():
@@ -196,26 +181,6 @@ async def test_tick_publishes_only_when_connected():
     reporter._connected = lambda: True  # type: ignore[assignment]
     await reporter._tick()
     assert len(published) == 1
-
-
-async def test_event_lag_is_reported_in_link_group(tmp_path):
-    """补传落后量只有机器人自己知道（本地还有多少条没发出去）。"""
-    outbox = EventOutbox(tmp_path / "events.db")
-    await outbox.open()
-    for index in range(3):
-        await outbox.append("x", {"i": index})
-
-    published: list[dict] = []
-    reporter = StateReporter(
-        FakeBackend(HEALTH),  # type: ignore[arg-type]
-        FakeMedia(),  # type: ignore[arg-type]
-        published.append,
-        outbox=outbox,
-    )
-
-    payload = await reporter.build()
-
-    assert payload["link"]["event_lag_seq"] == 3
 
 
 async def test_event_lag_is_reported_in_link_group(tmp_path):
@@ -339,3 +304,59 @@ async def test_appending_wakes_the_uploader(tmp_path):
     uploader.notify()
 
     assert await asyncio.wait_for(uploader._wake.wait(), 1.0) is True
+
+
+async def test_uploader_enforces_the_outbox_limit_on_its_first_pass(tmp_path):
+    """限容必须真有人调，否则 200MB / 7 天这条上限形同虚设。
+
+    以前 `enforce_limits()` 只被测试调用：一台断网几周的机器会把磁盘写满，
+    而且 `event.gap` 永远不会出现——云端看到的是一条"什么都没发生"的完整
+    时间线，比明确报缺口更糟。
+    """
+    outbox = await make_outbox(tmp_path, max_bytes=200)
+    for index in range(40):
+        await outbox.append("task.progress", {"i": index, "pad": "x" * 60})
+    before = (await outbox.stats())["count"]
+
+    class Config:
+        token = ""
+        agent_id = "b-1"
+        http_base = "http://127.0.0.1:1"
+
+    uploader = EventUploader(Config(), outbox)  # type: ignore[arg-type]
+
+    dropped = await uploader.enforce_limits()
+
+    assert dropped > 0
+    assert uploader.dropped == dropped
+    after = (await outbox.stats())
+    assert after["count"] < before
+    # 落后量按"表里还剩多少条"算，而不是 max_seq - acked：
+    # 否则被裁掉的历史会一直被算成待补传，页面上的数字永远回不到 0。
+    assert after["lag"] == after["count"]
+
+
+async def test_uploader_enforce_is_rate_limited(tmp_path):
+    """限容是两条聚合 SQL，不能每 2s 跑一次。"""
+    outbox = await make_outbox(tmp_path)
+
+    class Config:
+        token = ""
+        agent_id = "b-1"
+        http_base = "http://127.0.0.1:1"
+
+    uploader = EventUploader(Config(), outbox)  # type: ignore[arg-type]
+    await uploader.enforce_limits()          # 第一次一定跑
+    uploader._last_enforce = time.time()      # 刚跑过
+
+    calls: list[int] = []
+    original = outbox.enforce_limits
+
+    async def counting() -> int:
+        calls.append(1)
+        return await original()
+
+    outbox.enforce_limits = counting        # type: ignore[assignment]
+
+    assert await uploader.enforce_limits() == 0
+    assert calls == []

@@ -133,6 +133,56 @@ async def test_ptz_stop_forces_stop_direction():
     assert backend.commands[0]["payload"]["direct"] == "stop"
 
 
+class LocallyHeldBackend(FakeBackend):
+    """本地人工正握着控制权：申请租约一律 409。"""
+
+    async def acquire_lease(self, holder: str, mode: str = "manual_remote") -> dict:
+        self.leases.append(holder)
+        raise AgentCommandError(ErrorCode.CONTROL_HELD, "本地人工操作中")
+
+
+async def test_ptz_stop_does_not_need_a_lease():
+    """停止不能依赖租约有效性（方案 §5.4）。
+
+    本地人工正在操作时申请租约必然 409；如果停止也走申请，这条"松开"就会被拒，
+    球机要转到 deadman 超时才停。robot-core 的安全层对停止同样不看租约，
+    所以这里只需要一个能过传输层校验的占位 id。
+    """
+    backend = LocallyHeldBackend()
+    ctx = HandlerContext(
+        sandbox=None,  # type: ignore[arg-type]
+        uploads=None,  # type: ignore[arg-type]
+        backend=backend,  # type: ignore[arg-type]
+        media=FakeMedia(),  # type: ignore[arg-type]
+        leases=LeaseKeeper(backend),  # type: ignore[arg-type]
+        snapshots=Sink(),
+    )
+
+    result = await dispatch(
+        CommandName.CAMERA_PTZ, ptz_payload(action="stop", direct="right"), ctx
+    )
+
+    assert result["direct"] == "stop"
+    assert result["leaseId"] == LeaseKeeper.STOP_LEASE
+    command = backend.commands[0]
+    assert command["payload"]["direct"] == "stop"
+    # 停止发出的 lease_id 必须是合法形态（后端 schema 要求非空）
+    assert command["lease_id"] == LeaseKeeper.STOP_LEASE
+
+
+async def test_ptz_stop_reuses_the_cached_lease():
+    """已经控过（手里有租约）时，停止沿用它，不去额外申请一次。"""
+    ctx, backend, _, _ = make_context()
+    await dispatch(CommandName.CAMERA_PTZ, ptz_payload(sequence=1), ctx)
+
+    await dispatch(
+        CommandName.CAMERA_PTZ, ptz_payload(sequence=2, command_id="c-2", action="stop"), ctx
+    )
+
+    assert backend.leases == ["cloud:ctl-1"]        # 只申请过一次
+    assert backend.commands[1]["lease_id"] == "lease-1"
+
+
 async def test_ptz_speed_is_clamped():
     ctx, backend, _, _ = make_context()
 
@@ -175,6 +225,22 @@ async def test_expired_command_is_not_executed():
 
     assert raised.value.code is ErrorCode.EXPIRED
     assert backend.commands == []
+
+
+async def test_expired_stop_is_still_executed():
+    """停止不看 deadline（方案 §5.4 / safety.is_stop_command）。
+
+    一条迟到的停止仍然是安全的；丢掉它才是危险的——球机会一直转到 deadman
+    超时（3s），而用户早就松手了，看到的就是"松开 3 秒后还在转"。
+    """
+    ctx, backend, _, _ = make_context()
+
+    result = await dispatch(
+        CommandName.CAMERA_PTZ, ptz_payload(action="stop", direct="left", deadline=1.0), ctx
+    )
+
+    assert result["direct"] == "stop"
+    assert backend.commands[0]["payload"]["direct"] == "stop"
 
 
 async def test_stale_sequence_is_dropped():
@@ -245,23 +311,6 @@ async def test_stream_start_passes_profile_and_camera():
 
     assert media.started == [("med-1", "VAR-1", "low")]
     assert result["codec"] == "avc1.64001F"
-
-
-async def test_default_camera_alias_is_normalised_to_empty():
-    """云端用 "default" 表示"那台球形相机"，但本地相机目录里没有这个编号。
-
-    透传会得到 unknown_camera，本地预览 WS 直接被 1008 关闭——表现是页面
-    永远停在"等待画面"，而 agent 日志里只有一条 error 帧。
-    """
-    ctx, _, media, _ = make_context()
-
-    await dispatch(
-        CommandName.CAMERA_STREAM_START,
-        {"command_id": "c-20", "session_id": "med-9", "camera_id": "default"},
-        ctx,
-    )
-
-    assert media.started == [("med-9", "", "low")]
 
 
 async def test_default_camera_alias_is_normalised_to_empty():

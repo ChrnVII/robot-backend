@@ -93,6 +93,10 @@ DURABLE_EVENTS = frozenset({"upload_failed", "upload_completed", "command.result
 #: 子/主码流、GOP 一起调，声明一堆切不过去的档位只会让页面多出无效按钮。
 MEDIA_PROFILES: tuple[str, ...] = ("low",)
 
+#: 上行自述带宽上限（kbps，方案 §8.2）。云端只在挑档位时参考，不是硬约束：
+#: 真正的限速由出口链路决定，这里只是把"这台机器大概能推多少"说清楚。
+MAX_FRAME_KBPS = 2000
+
 
 class AgentObserver:
     """连接状态观察者。
@@ -405,12 +409,17 @@ class AgentClient:
         code: str,
         error: str,
     ) -> None:
-        """命令终态进事件表：页面能对账，排障时也能还原"点了几次、结果如何"。"""
+        """命令终态进事件表：页面能对账，排障时也能还原"点了几次、结果如何"。
+
+        `command_id` 优先取信封里的那个（与云端帧 `id`、`command_log` 同值）。
+        取帧 id 作为兜底是为了兼容"旧云端生成两个不同 id"的部署——那种情况下
+        事件里的 command_id 至少还能与那条命令的帧对应上。
+        """
         await self._record(
             "command.result",
             {
                 "command": command.value if command is not None else (message.command or ""),
-                "command_id": message.id,
+                "command_id": str(message.payload.get("command_id") or message.id),
                 "state": state,
                 "code": code,
                 "error": error[:200],
@@ -585,5 +594,6 @@ class AgentClient:
                 # 云端要分开显示：前者不该出现按钮，后者显示"不支持远程画面"而不是转圈。
                 "capabilities": list(CAPABILITIES),
                 "media_profiles": list(MEDIA_PROFILES),
+                "max_frame_kbps": MAX_FRAME_KBPS,
             },
         )

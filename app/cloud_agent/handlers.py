@@ -69,6 +69,13 @@ class LeaseKeeper:
     #: 续期节流：小于这个间隔的重复申请没意义（TTL 是秒级）。
     RENEW_AFTER = 1.5
 
+    #: 停止命令用的占位租约。
+    #:
+    #: 传输入口（`CommandRequest.leaseId`）要求非空，而 robot-core 的
+    #: `SafetySupervisor` 对停止命令**不看租约**。所以停止时给一个合法但不被
+    #: 认可的 id：既过得了传输层校验，也不会因为这个请求去抢本地人的控制权。
+    STOP_LEASE = "cloud-stop-no-lease"
+
     def __init__(self, backend: LocalBackend) -> None:
         self._backend = backend
         self._leases: dict[str, tuple[str, float]] = {}
@@ -85,6 +92,16 @@ class LeaseKeeper:
         lease_id = lease_id_of(data)
         self._leases[session_id] = (lease_id, now)
         return lease_id
+
+    def peek(self, session_id: str) -> str:
+        """不看租约是否有效，只取一个能用于**停止**的 id。
+
+        停止不能走 `ensure()`：本地人工正握着控制权时 `acquire_lease` 会 409，
+        那样"松开方向键"这条命令会被拒，球机要一直转到 deadman（3s）才停。
+        方案 §5.4 明确写了"停止命令不依赖租约有效性"。
+        """
+        current = self._leases.get(session_id)
+        return current[0] if current is not None else self.STOP_LEASE
 
     async def release(self, session_id: str) -> None:
         current = self._leases.pop(session_id, None)
@@ -131,6 +148,11 @@ async def _dispatch_arbitrated(
 
     顺序不能换：先查去重是"这条我做过，直接给答案"（比重发更早），
     再判过期（做也可能来不及），最后才比序号（决定要不要覆盖上一个动作）。
+
+    唯一的例外是**停止**：不做 deadline 判定。一条迟到的停止仍然是安全的，
+    而丢掉它会让球机停在动作中途一直转到 deadman——这正是"松开 5 秒后还在转"
+    的成因。robot-core 的 `safety.is_stop_command` 用的是同一条规则，两层不能
+    各有一套。
     """
     envelope = parse_envelope(payload, new_id())
 
@@ -139,7 +161,7 @@ async def _dispatch_arbitrated(
         # 重发：不重复执行，但要回同一个答案，否则云端会一直当它没到。
         return {**replayed, "replayed": True}
 
-    if ctx.arbiter.is_expired(envelope):
+    if not _is_stop_command(command, payload) and ctx.arbiter.is_expired(envelope):
         raise AgentCommandError(
             ErrorCode.EXPIRED,
             f"{command.value} 超过 deadline（{(envelope.deadline or 0) - time.time():.2f}s），未执行",
@@ -388,6 +410,27 @@ async def _lease(ctx: HandlerContext, session_id: str) -> str:
     return await ctx.leases.ensure(session_id)
 
 
+def _stop_lease(ctx: HandlerContext, session_id: str) -> str:
+    """停止命令专用的租约取值：只取缓存，绝不新申请。"""
+    if ctx.leases is None:
+        return LeaseKeeper.STOP_LEASE
+    return ctx.leases.peek(session_id)
+
+
+def _is_stop_command(command: CommandName, payload: dict[str, Any]) -> bool:
+    """是否为"停止类"命令。
+
+    与 robot-core `safety.is_stop_command`、云端 `routes/camera.py` 的
+    `action == "stop"` 保持一致：这类命令不受 deadline 约束、不依赖租约。
+    迟到的停止仍然是安全的，而拒绝它会让云台停在动作中途。
+    """
+    if command is not CommandName.CAMERA_PTZ:
+        return False
+    action = str(payload.get("action") or "").strip().lower()
+    direct = str(payload.get("direct") or "").strip().lower()
+    return action == "stop" or direct == "stop"
+
+
 #: 云端用来表示"这台设备唯一那路相机"的占位编号。
 #: 本地 backend 的相机目录里没有叫 default 的相机，直接透传会得到
 #: `unknown_camera`——所以在这里归一化成空串，由本地按"缺省球形相机"解析。
@@ -430,7 +473,11 @@ async def _camera_ptz(payload: dict[str, Any], ctx: HandlerContext) -> dict[str,
             ErrorCode.INVALID_ARGUMENTS, f"不支持的云台方向：{direct!r}"
         )
 
-    lease_id = await _lease(ctx, session_id)
+    # 停止不走租约申请：本地人工握着控制权时申请会 409，而停止恰恰是那种
+    # 必须无条件生效的命令（方案 §5.4）。机器人端的安全层对停止也不看租约。
+    lease_id = (
+        _stop_lease(ctx, session_id) if direct == "stop" else await _lease(ctx, session_id)
+    )
     result = await _backend(ctx).command(
         action="camera.ptz",
         payload={"direct": direct, "speed": _ptz_speed(payload.get("speed"))},
