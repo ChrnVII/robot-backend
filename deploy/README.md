@@ -7,7 +7,7 @@
 
 ```text
 <项目>/                            # backend/ 内容整体
-  robot.env                       # 凭据与环境变量（cp robot.env.example robot.env，勿提交）
+  robot.env                       # 凭据与环境变量（cp robot.env.example robot.env；已在 .gitignore 中，不进仓库）
   .venv/                          # uv sync 生成（开发机复制来的会自动重建）
   app/                            # FastAPI 后端 + robot_core 运行时 + cloud_agent
   configs/hardware.yaml           # 硬件与数据库配置

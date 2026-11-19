@@ -8,6 +8,8 @@ __pycache__/
 # 本地环境、运行数据与凭据
 .venv/
 .env
+# 机器人本机配置（模板见 robot.env.example）：含数据库/相机/JWT 凭据，不能进仓库
+robot.env
 .cloud-agent/
 configs/cloud-agent.toml
 
