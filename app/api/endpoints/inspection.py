@@ -35,6 +35,20 @@ async def stop_inspection(
     return ok(await inspection.stop(task_run_id), trace_of(request))
 
 
+@router.get("/inspections/active", tags=["inspection"])
+async def active_inspection(
+    request: Request,
+    inspection: InspectionService = Depends(get_inspection_service),
+) -> dict:
+    """当前正在跑的任务；没有则 ``{"state": "idle"}``。
+
+    必须声明在 ``/inspections/{task_run_id}`` **之前**，否则 "active" 会被当成任务 ID
+    去吃 400（ID 字符集校验）。前端靠它显示"正在跑什么"并拦截第二个启动请求——
+    巡检域只有一个任务槽位（worker 里 `_thread` 非空即拒绝）。
+    """
+    return ok(await inspection.active(), trace_of(request))
+
+
 @router.get("/inspections/{task_run_id}", tags=["inspection"])
 async def inspection_status(
     request: Request,
@@ -43,6 +57,31 @@ async def inspection_status(
 ) -> dict:
     ensure_id(task_run_id)
     return ok(await inspection.status(task_run_id), trace_of(request))
+
+
+@router.get("/inspections/{task_run_id}/file", tags=["inspection"])
+async def inspection_file(
+    task_run_id: str,
+    path: str = Query(..., description="相对任务目录的路径，如 cam01/video.mkv"),
+    inspection: InspectionService = Depends(get_inspection_service),
+):
+    """下载任务目录内的单个产物（视频 / 音频 / 检测记录）。
+
+    只允许任务目录内部：先 resolve 再判断包含关系，`..` 与软链接都会被展开后拦下。
+    """
+    from fastapi.responses import FileResponse
+
+    from app.common.exceptions import AppError
+    from app.common.media_types import mime_for
+
+    directory = await _task_directory(inspection, task_run_id)
+    base = directory.resolve()
+    target = (base / path).resolve()
+    if target != base and base not in target.parents:
+        raise AppError("非法的文件路径", code="ARTIFACT_FORBIDDEN", status_code=400)
+    if not target.is_file():
+        raise AppError(f"文件不存在：{path}", code="ARTIFACT_NOT_FOUND", status_code=404)
+    return FileResponse(target, media_type=mime_for(target.name), filename=target.name)
 
 
 @router.get("/inspections/{task_run_id}/detections", tags=["inspection"])

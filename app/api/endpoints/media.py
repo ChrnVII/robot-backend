@@ -16,12 +16,14 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse
 
 from app.api.deps import get_media_library_service, get_media_service
 from app.common.responses import ok, trace_of
 from app.schemas.media import MediaCaptureRequest
 from app.services.media import MediaLibraryService, MediaService
+from app.services.media_preview import preview_file
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,24 @@ async def download_media_asset(
     return FileResponse(
         path, media_type=mime, filename=file_name,
         headers={"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.get("/media/preview", tags=["media"])
+async def preview_media_file(
+    path: str = Query(..., description="受管目录内文件的绝对路径（cams / adhoc / missions / dome-cam）"),
+) -> Response:
+    """把 MKV 预览成浏览器可播的 MP4（只转封装不重编码，命中缓存直接返回）。
+
+    前端不再需要自己拼 URL 或猜测容器：拿到的是现成的、支持 Range 的 MP4，
+    `<video>` 可以直接拖动进度条。缓存位于 `run/preview/`，不进 `data/`，
+    因此不会被 cloud-agent 当成采集数据同步走。
+    """
+    target = await run_in_threadpool(preview_file, path)
+    return FileResponse(
+        target,
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=600"},
     )
 
 

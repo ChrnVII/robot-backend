@@ -271,6 +271,75 @@ class MissionService:
     def get_mission(self, mission_id: str) -> dict[str, Any]:
         return _to_public(self._require(mission_id))
 
+    def list_runs(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        keyword: str = "",
+        state: str | None = None,
+    ) -> Any:
+        """全局运行记录（采集会话实例），按开始时间倒序。
+
+        与 ``/runs``（ui_runs 影子表，只有底盘任务命令会写）不同：这里读的是
+        ``mission_runs``，即「任务管理」里真正跑起来的采集会话，前端「运行数据」页用它。
+        带 mission 名称，避免用户只能看到一串 mission-xxxx。
+        """
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
+        search = (keyword or "").strip()
+        if search:
+            clauses.append(
+                "(r.task_run_id ILIKE :kw OR r.mission_id ILIKE :kw OR coalesce(m.name, '') ILIKE :kw)"
+            )
+            params["kw"] = f"%{search}%"
+        if state:
+            clauses.append("r.state = :state")
+            params["state"] = state
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        base = " FROM mission_runs r LEFT JOIN missions m ON m.mission_id = r.mission_id" + where
+        columns = (
+            "r.task_run_id, r.mission_id, m.name AS mission_name, r.state,"
+            " r.started_at, r.finished_at, r.current_step, r.failure_code, r.updated_at"
+        )
+        order = " ORDER BY r.started_at DESC"
+
+        def to_public(row) -> dict[str, Any]:
+            return {
+                "taskRunId": row["task_run_id"],
+                "missionId": row["mission_id"],
+                "missionName": row["mission_name"] or "",
+                "state": row["state"],
+                "startedAt": row["started_at"],
+                "finishedAt": row["finished_at"] or "",
+                "currentStep": row["current_step"] or "",
+                "failureCode": row["failure_code"] or "",
+                "updatedAt": row["updated_at"],
+            }
+
+        if page is None:
+            limit = max(1, min(int(page_size or 200), 500))
+            rows = self._session.execute(
+                text(f"SELECT {columns}{base}{order} LIMIT :limit"), {**params, "limit": limit}
+            ).mappings()
+            return [to_public(row) for row in rows]
+
+        size = max(1, min(int(page_size or 20), 500))
+        offset = (max(1, int(page)) - 1) * size
+        total_row = self._session.execute(
+            text(f"SELECT count(*) AS total{base}"), params
+        ).mappings().first()
+        rows = self._session.execute(
+            text(f"SELECT {columns}{base}{order} LIMIT :limit OFFSET :offset"),
+            {**params, "limit": size, "offset": offset},
+        ).mappings()
+        return {
+            "rows": [to_public(row) for row in rows],
+            "total": int(total_row["total"]) if total_row else 0,
+            "page": max(1, int(page)),
+            "pageSize": size,
+        }
+
     def create_mission(self, body: dict[str, Any]) -> dict[str, Any]:
         name = str(body.get("name") or "").strip()
         if not name:

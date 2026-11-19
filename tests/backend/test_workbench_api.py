@@ -70,13 +70,21 @@ def test_config_get_save_and_inspection_variant(client):
 
 def test_map_stations_and_version_conflict(client):
     initial = client.get("/api/v1/map/stations").json()["data"]
-    assert initial[0]["stationId"] == "st-1"
+    # GET 必须同时给出站点与版本：前端靠它通过保存时的乐观锁校验。
+    assert initial["mapVersion"] == 1
+    assert initial["stations"][0]["stationId"] == "st-1"
+    assert initial["rows"] == initial["stations"]
 
     saved = client.put("/api/v1/map/stations", json={
         "mapVersion": 1, "stations": [{"stationId": "st-9", "station": 9}],
     }).json()["data"]
     assert saved["mapVersion"] == 2
     assert saved["stations"][0]["stationId"] == "st-9"
+
+    # 保存后再读：版本必须跟着涨，否则页面一刷新就只能拿旧版本号提交，永远 400。
+    after = client.get("/api/v1/map/stations").json()["data"]
+    assert after["mapVersion"] == 2
+    assert after["stations"][0]["stationId"] == "st-9"
 
     stale = client.put("/api/v1/map/stations", json={"mapVersion": 1, "stations": []})
     assert stale.status_code == 400

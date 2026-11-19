@@ -67,7 +67,27 @@ class InspectionService:
             value["task_run_id"] = request.taskRunId
         if request.cameraIds:
             value["camera_ids"] = list(request.cameraIds)
-        return camelize(await self._call(value))
+        try:
+            return camelize(await self._call(value))
+        except InspectionWorkerError as error:
+            # inspection-worker 同时只跑一个任务，第二个 start 会被引擎直接拒绝。
+            # 原样透出去前端只会拿到 500 + 英文，改成 409 + 可读原因，
+            # 前端才能据此提示「先停止当前检测」而不是当成系统故障。
+            if "already running" in str(error).lower():
+                raise AppError(
+                    "已有一个检测/采集任务在运行，请先停止它再开始新的任务",
+                    code="TASK_BUSY",
+                    status_code=409,
+                ) from error
+            raise
+
+    async def active(self) -> dict:
+        """当前正在跑的任务（没有则 ``{"state": "idle"}``）。
+
+        巡检域只有一个任务槽位，前端需要它来显示"正在跑什么"并拦截第二个启动请求。
+        不传 task_run_id 时 worker 直接返回自己的活动任务，不需要遍历历史。
+        """
+        return camelize(await self._call({"operation": Op.TASK_STATUS}))
 
     async def start_video_stream(self, request: StartVideoStreamRequest) -> dict:
         self._validate_cameras(list(request.cameraIds), request.mode)

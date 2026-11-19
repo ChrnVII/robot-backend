@@ -36,6 +36,27 @@ def list_missions(
     )
 
 
+@router.get("/mission-runs", tags=["missions"])
+def list_mission_runs(
+    request: Request,
+    page: int | None = Query(default=None, ge=1, description="页码从 1 开始；不传返回数组"),
+    pageSize: int | None = Query(default=None, ge=1, le=500, description="每页条数"),
+    keyword: str = Query(default="", description="按执行 ID / 任务 ID / 任务名称模糊搜索"),
+    state: str | None = Query(default=None, description="queued / executing / completed / failed / aborted / interrupted"),
+    service: MissionService = Depends(get_mission_service),
+) -> dict:
+    """全局运行记录。
+
+    前端「运行数据」页此前读的是 ``/runs``（ui_runs 影子表）：只有底盘任务命令会写，
+    采集会话的真实记录在 ``mission_runs``，于是页面长期是空的。这里补上全局视图，
+    ``/runs`` 保持原样不动（旧工作台仍在用）。
+    """
+    return ok(
+        service.list_runs(page=page, page_size=pageSize, keyword=keyword, state=state),
+        trace_of(request),
+    )
+
+
 @router.post("/missions", tags=["missions"])
 def create_mission(
     request: Request,

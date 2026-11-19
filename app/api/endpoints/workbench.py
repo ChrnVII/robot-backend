@@ -135,7 +135,22 @@ def save_config(
 
 @router.get("/map/stations", tags=["workbench"])
 def get_stations(request: Request, service: WorkbenchService = Depends(get_workbench_service)) -> dict:
-    return ok(service.get_map()["stations"], trace_of(request))
+    """站点表 + 当前版本号。
+
+    必须带回 ``mapVersion``：保存走的是「带版本号的整表覆盖」，前端只有拿到
+    服务端版本才能通过乐观锁校验。此前这里只返回数组，前端只能拿常量 1 提交，
+    一旦服务端版本涨到 2，页面刷新后再保存就永远 400（"请重新读取"也读不到版本）。
+    ``stations`` 与 ``rows`` 同源，保留 ``rows`` 只是为了兼容按列表解析的旧调用方。
+    """
+    payload = service.get_map()
+    return ok(
+        {
+            "mapVersion": payload["mapVersion"],
+            "stations": payload["stations"],
+            "rows": payload["stations"],
+        },
+        trace_of(request),
+    )
 
 
 @router.put("/map/stations", tags=["workbench"])
