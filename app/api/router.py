@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.endpoints import (
     alerts,
+    audio,
     auth,
     cameras,
     cloud_link,
@@ -33,6 +34,7 @@ protected.include_router(cameras.router, tags=["cameras"])
 protected.include_router(robot.router, tags=["robot"])
 protected.include_router(control.router, tags=["control"])
 protected.include_router(media.router, tags=["media"])
+protected.include_router(audio.router, tags=["audio"])
 protected.include_router(inspection.router, tags=["inspection"])
 protected.include_router(video.router, tags=["video"])
 protected.include_router(workbench.router, tags=["workbench"])

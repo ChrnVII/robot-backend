@@ -19,6 +19,7 @@ from app.gateways.robot_core import RobotCoreGateway, create_robot_core_gateway
 from app.gateways.sensor_worker import SensorWorkerGateway, create_sensor_worker_gateway
 from app.services.cameras import CameraDirectoryService
 from app.services.alerts import AlertsService
+from app.services.audio_recording import AudioRecordingService
 from app.services.control import ControlService
 from app.services.inspection import InferenceQueryService, InspectionService
 from app.services.media import MediaLibraryService, MediaService
@@ -81,6 +82,12 @@ def get_media_library_service() -> MediaLibraryService:
 @lru_cache(maxsize=1)
 def get_inspection_service() -> InspectionService:
     return InspectionService(get_inspection_worker_gateway(), get_camera_directory())
+
+
+@lru_cache(maxsize=1)
+def get_audio_recording_service() -> AudioRecordingService:
+    # 必须是进程内单例：/audio/recordings/stop 要能找到 start 时启动的那个线程与 stop_event。
+    return AudioRecordingService()
 
 
 @lru_cache(maxsize=1)

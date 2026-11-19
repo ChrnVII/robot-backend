@@ -20,10 +20,11 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse
 
 from app.api.deps import get_media_library_service, get_media_service
+from app.common.media_types import mime_for
 from app.common.responses import ok, trace_of
 from app.schemas.media import MediaCaptureRequest
 from app.services.media import MediaLibraryService, MediaService
-from app.services.media_preview import preview_file
+from app.services.media_preview import preview_file, resolve_source
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,24 @@ async def download_media_asset(
     return FileResponse(
         path, media_type=mime, filename=file_name,
         headers={"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.get("/media/file", tags=["media"])
+async def download_managed_file(
+    path: str = Query(..., description="受管目录内文件的绝对路径（cams / adhoc / missions / dome-cam）"),
+) -> Response:
+    """按绝对路径下载受管目录内的任意产物（视频 / 音频 / 记录）。
+
+    与 ``/media/preview`` 的分工：预览只处理需要换容器的视频；音频（WAV）和 JSON
+    本身就是浏览器可用的格式，直接原样返回，前端用 blob 播放或下载即可。
+    """
+    target = await run_in_threadpool(resolve_source, path)
+    return FileResponse(
+        target,
+        media_type=mime_for(target.name),
+        filename=target.name,
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=600"},
     )
 
 
