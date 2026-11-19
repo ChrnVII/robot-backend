@@ -18,3 +18,6 @@ class StartAudioRecordingRequest(BaseModel):
         max_length=1024,
         description="任务目录绝对路径（须在 data/cams 下）；省略则自动新建",
     )
+    #: 到点自动停止（秒）。0 或缺省＝手动结束。与视频任务用同一个时长，
+    #: 否则"声音+视频 + 5 分钟"时视频到点停了、音频还在写，是很隐蔽的 bug。
+    durationSeconds: float = Field(default=0.0, ge=0, le=86400)

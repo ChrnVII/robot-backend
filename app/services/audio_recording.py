@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -113,7 +115,8 @@ class AudioRecordingService:
 
     # -- 对外接口 ---------------------------------------------------------
 
-    def start(self, directory: str | Path | None = None, *, name: str = "手动采集") -> dict[str, Any]:
+    def start(self, directory: str | Path | None = None, *, name: str = "手动采集",
+              duration_seconds: float = 0.0) -> dict[str, Any]:
         # 有视频时用巡检建好的任务目录（音频与视频同处一处）；只录声音时后端自己建一个。
         target = _resolve_directory(directory) if directory else _create_session_directory(name)
         with self._lock:
@@ -139,11 +142,12 @@ class AudioRecordingService:
                 "error": "",
                 "metrics": None,
                 "stopEvent": threading.Event(),
+                "limitSeconds": max(0.0, float(duration_seconds or 0.0)),
             }
             self._state = state
             self._thread = threading.Thread(
                 target=self._run,
-                args=(settings, path, state),
+                args=(settings, path, state, max(0.0, float(duration_seconds or 0.0))),
                 daemon=True,
                 name="audio-recording",
             )
@@ -175,7 +179,8 @@ class AudioRecordingService:
 
     # -- 内部实现 ---------------------------------------------------------
 
-    def _run(self, settings: AudioSettings, path: Path, state: dict[str, Any]) -> None:
+    def _run(self, settings: AudioSettings, path: Path, state: dict[str, Any],
+             limit_seconds: float = 0.0) -> None:
         writer: ContinuousWavWriter | None = None
         try:
             # writer 放在线程里创建：设备打不开时就不会留下一个 44 字节的空 WAV。
@@ -186,6 +191,8 @@ class AudioRecordingService:
                 settings,
                 continuous_writer=writer,
                 stop_event=state["stopEvent"],
+                # 0/None 表示不限；与视频任务同一个时长，避免视频停了音频还在写
+                max_duration_seconds=limit_seconds or None,
             )
             state["metrics"] = result.get("metrics")
             continuous = result.get("continuous") or {}
@@ -212,6 +219,8 @@ class AudioRecordingService:
                 # 只删没写进任何数据的空文件；中途失败保留了数据的不删，留给现场判断
                 _discard(path)
             state["finishedAt"] = time.time()
+            # 侧车元数据：记录起止时间，后处理可用它与视频的 started_at 算偏移（见 CHANGELOG 限制 1）
+            _write_metadata(path, state)
 
     @staticmethod
     def _public(state: dict[str, Any]) -> dict[str, Any]:
@@ -239,3 +248,29 @@ def _discard(path: Path) -> None:
             path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _write_metadata(path: Path, state: dict[str, Any]) -> None:
+    """写 `audio/recording.json`：录音的起止时间与参数。
+
+    它不为界面服务，而是给后处理用：视频任务的 `started_at` 与这里的 `startedAt`
+    都在同一台机器上取，两者的差值就是这次采集的音视频偏移量，可以据此对齐。
+    """
+    payload = {
+        "startedAt": state.get("startedAt"),
+        "finishedAt": state.get("finishedAt"),
+        "durationSeconds": state.get("durationSeconds") or 0.0,
+        "sampleRate": state.get("sampleRate"),
+        "channels": state.get("channels"),
+        "bytes": state.get("bytes") or 0,
+        "state": state.get("state"),
+        "error": state.get("error") or "",
+        "limitSeconds": state.get("limitSeconds") or 0.0,
+    }
+    try:
+        target = path.with_name("recording.json")
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError as error:
+        logger.warning("write audio metadata failed: %s", error)

@@ -23,7 +23,7 @@ def start_audio_recording(
     service: AudioRecordingService = Depends(get_audio_recording_service),
 ) -> dict:
     """开始录音。已经有录音在进行时返回 409 `AUDIO_BUSY`（麦克风独占）。"""
-    return ok(service.start(body.directory), trace_of(request))
+    return ok(service.start(body.directory, duration_seconds=body.durationSeconds), trace_of(request))
 
 
 @router.post("/audio/recordings/stop", tags=["audio"])

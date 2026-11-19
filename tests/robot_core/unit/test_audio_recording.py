@@ -119,3 +119,21 @@ def test_device_failure_leaves_no_empty_file(tmp_path, monkeypatch):
     assert active is not None and active["state"] == "failed"
     assert "audio device unavailable" in active["error"]
     assert not (task_dir / "audio" / "session.wav").exists()
+
+
+def test_writes_sidecar_metadata_for_sync(service):
+    """audio/recording.json 是给后处理算音视频偏移用的，字段不能少。"""
+    import json
+
+    instance, task_dir, _provider = service
+    instance.start(task_dir, duration_seconds=1.5)
+    deadline = time.monotonic() + 3
+    while instance.active()["state"] != "recording" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    instance.stop()
+
+    meta = json.loads((task_dir / "audio" / "recording.json").read_text(encoding="utf-8"))
+    assert meta["limitSeconds"] == 1.5
+    assert meta["durationSeconds"] > 0
+    assert meta["startedAt"] <= meta["finishedAt"]
+    assert meta["sampleRate"] == 44100 and meta["channels"] == 1
